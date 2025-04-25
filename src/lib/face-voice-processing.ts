@@ -352,6 +352,7 @@ export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<Uploa
         const chatFilesToLink: ChatFileLinkInfo[] = await Promise.all(
             chatFileInfos.map(async ({ file, fileId, source }) => {
                 const content = await fetchChatContent(file);
+                 // Ensure content is serializable (it's already a string)
                 return {
                     fileId: fileId,
                     fileName: file.name,
@@ -366,17 +367,18 @@ export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<Uploa
 
         // --- 4. Fetch Existing Albums for Linking ---
         const existingAlbumsRaw = await fetchAlbumsFromDatabase();
+        // Ensure albums passed to the client are serializable
         const existingAlbums = existingAlbumsRaw.map(album => ({
             ...album,
-            media: album.media.map(m => ({ ...m, file: undefined }))
+            media: album.media.map(m => ({ ...m, file: undefined })) // Ensure no File objects here
         }));
 
         console.log(`[Analysis] Fetched ${existingAlbums.length} existing albums for review.`);
 
         const results: UploadAnalysisResults = {
-             mediaResults,
-             chatFilesToLink,
-             existingAlbums,
+             mediaResults, // Already processed to be serializable
+             chatFilesToLink, // Already processed to be serializable
+             existingAlbums, // Processed to be serializable
         };
 
          // --- 5. Final Serialization Check ---
@@ -385,6 +387,7 @@ export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<Uploa
             console.log("[Analysis] Analysis results successfully serialized.");
          } catch (e) {
              console.error("[Analysis] CRITICAL ERROR: Analysis results are not serializable!", e);
+             // This should not happen if previous steps are correct, but good safeguard
              throw new Error(`Failed to serialize analysis results: ${e instanceof Error ? e.message : String(e)}`);
          }
 
@@ -394,11 +397,10 @@ export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<Uploa
     } catch (error) {
         // --- Catch any error during the analysis process ---
         console.error("[Analysis Action Error] An error occurred during analyzeUploadedFiles:", error);
-        // Re-throw the error to ensure Next.js handles it, potentially returning a structured error
-        // For now, re-throwing might still lead to "unexpected response" if not handled properly upstream,
-        // but it makes the source of the error clearer in server logs.
-        // Consider returning a specific error structure if needed later.
-        throw error; // Re-throw the caught error
+        // Re-throw the error so Next.js Server Action handler can catch it
+        // It will likely result in the generic "unexpected response" on the client,
+        // but the actual error will be logged on the server.
+        throw error;
     }
 }
 
@@ -418,13 +420,67 @@ async function createOrUpdateAlbumsFromReview(
     existingAlbums: Album[]
 ): Promise<{ updatedAlbums: Album[], mediaAddedToAlbum: Map<string, Set<string | number>>, newUnnamedAlbums: Map<string, Album>}> {
     console.log("[Processing] Applying face/voice review decisions to albums...");
+    // Work with a mutable map, starting with serializable albums
     const albumsMap: Map<string, Album> = new Map(
-        existingAlbums.map(a => [a.id, { ...a, media: a.media.map(m => ({...m, file: undefined})) }])
+        existingAlbums.map(a => [a.id, JSON.parse(JSON.stringify(a))]) // Deep copy to ensure serializability and mutability
     );
     const newUnnamedAlbums: Map<string, Album> = new Map();
     const mediaAddedToAlbum: Map<string, Set<string | number>> = new Map();
     existingAlbums.forEach(album => mediaAddedToAlbum.set(album.id, new Set()));
+    const processedMediaIds = new Set<string | number>(); // Track media already added to avoid duplicates across different faces/voices in the same file
 
+    // Helper to safely add media to an album
+    const addMediaToAlbum = (album: Album, media: MediaItem) => {
+        const serializableMedia = { ...media, file: undefined }; // Ensure no File object
+        if (!album.media.some(m => m.id === serializableMedia.id)) {
+            album.media.push(serializableMedia);
+            album.mediaCount = album.media.length;
+            mediaAddedToAlbum.get(album.id)?.add(serializableMedia.id);
+             console.log(`   - Added media ${serializableMedia.id} (${serializableMedia.alt}) to album ${album.id}`);
+            processedMediaIds.add(serializableMedia.id);
+            return true;
+        }
+         console.log(`   - Media ${serializableMedia.id} (${serializableMedia.alt}) already in album ${album.id}.`);
+        return false;
+    };
+
+     // Helper to update cover image if needed
+    const updateCoverImage = (album: Album, face: AnalyzedFace | null, media: MediaItem) => {
+        const currentCoverIsPlaceholder = !album.coverImage || album.coverImage.includes('placeholder') || album.coverImage.includes('picsum');
+        if (face?.imageDataUrl && currentCoverIsPlaceholder) {
+            album.coverImage = face.imageDataUrl;
+             console.log(`   - Updated cover image for album ${album.id} with face crop.`);
+        } else if ((media.type === 'image' || media.type === 'video') && currentCoverIsPlaceholder) {
+            album.coverImage = media.url; // Use the persistent media URL
+             console.log(`   - Updated cover image for album ${album.id} with media URL.`);
+        }
+    };
+
+     // Helper to update voice sample if needed
+    const updateVoiceSample = (album: Album, voice: AnalyzedVoice | null, media: MediaItem) => {
+        if (!album.voiceSampleUrl && voice) {
+            let voiceUrl: string | null = null;
+            if (media.type === 'audio') voiceUrl = media.url; // Use persistent audio URL
+            else if (mediaItemToAdd.type === 'video') { // Typo fixed: should be media.type
+                 const safeFileName = media.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
+                 // Construct the persistent path for extracted audio
+                 voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
+            }
+
+            if (voiceUrl) {
+                album.voiceSampleUrl = voiceUrl;
+                album.voiceSampleAvailable = true;
+                console.log(`   - Set voice sample for album ${album.id} from ${media.alt}`);
+            }
+        }
+    };
+
+    // Find media result by tempFaceId or tempVoiceId
+    const findMediaResultByTempId = (tempId: string): MediaAnalysisResult | undefined => {
+        return analysisResults.mediaResults.find(res =>
+            res.analyzedFaces.some(f => f.tempId === tempId) || res.analyzedVoice?.tempId === tempId
+        );
+    };
 
     // --- 1. Process Face Mappings ---
     for (const faceMap of userDecisions.faceMappings) {
@@ -433,15 +489,19 @@ async function createOrUpdateAlbumsFromReview(
             continue;
         }
 
-        const resultContainingFace = analysisResults.mediaResults.find(res =>
-            res.analyzedFaces.some(f => f.tempId === faceMap.tempFaceId)
-        );
+        const resultContainingFace = findMediaResultByTempId(faceMap.tempFaceId);
         if (!resultContainingFace) {
             console.warn(`[Processing] Could not find original media for face ${faceMap.tempFaceId}. Skipping.`);
             continue;
         }
         const analyzedFace = resultContainingFace.analyzedFaces.find(f => f.tempId === faceMap.tempFaceId)!;
-        const mediaItemToAdd = resultContainingFace.originalMedia;
+        const mediaItemToAdd = resultContainingFace.originalMedia; // Already serializable with persistent URL
+
+         if (processedMediaIds.has(mediaItemToAdd.id)) {
+             console.log(` -> Media ${mediaItemToAdd.id} already processed for another face/voice. Skipping duplicate addition for face ${faceMap.tempFaceId}.`);
+             continue;
+         }
+
 
         let targetAlbum: Album | undefined;
         let targetAlbumId: string;
@@ -450,35 +510,31 @@ async function createOrUpdateAlbumsFromReview(
             targetAlbumId = `album_unnamed_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
             console.log(` -> Creating new unnamed album (ID: ${targetAlbumId}) for face ${faceMap.tempFaceId} from ${mediaItemToAdd.alt}`);
 
-            const associatedVoice = resultContainingFace.analyzedVoice;
-            let voiceUrl: string | null = null;
-            const voiceAssignedToNew = userDecisions.voiceMappings.some(vm =>
-                vm.tempVoiceId === associatedVoice?.tempId && vm.assignedAlbumId === 'new_unnamed'
-            );
-
-            if (associatedVoice && voiceAssignedToNew) {
-                if (mediaItemToAdd.type === 'audio') voiceUrl = mediaItemToAdd.url;
-                else if (mediaItemToAdd.type === 'video') {
-                     const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
-                     voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
-                }
-            }
+            // Check if the voice from the *same* media is also assigned to 'new_unnamed'
+             const associatedVoice = resultContainingFace.analyzedVoice;
+             const voiceAlsoMappedToNew = userDecisions.voiceMappings.some(vm =>
+                 vm.tempVoiceId === associatedVoice?.tempId && vm.assignedAlbumId === 'new_unnamed'
+             );
 
             targetAlbum = {
                 id: targetAlbumId,
                 name: 'Unnamed',
+                 // Use face crop first, then media URL, then fallback
                 coverImage: analyzedFace.imageDataUrl ||
                               (mediaItemToAdd.type === 'image' || mediaItemToAdd.type === 'video' ? mediaItemToAdd.url : '') ||
                               'https://picsum.photos/seed/placeholder/200/200',
-                media: [],
+                media: [], // Start empty
                 mediaCount: 0,
-                voiceSampleAvailable: !!voiceUrl,
-                voiceSampleUrl: voiceUrl,
+                voiceSampleAvailable: false, // Initial state
+                voiceSampleUrl: null, // Initial state
                 summary: ''
             };
             albumsMap.set(targetAlbumId, targetAlbum);
             newUnnamedAlbums.set(targetAlbumId, targetAlbum);
             mediaAddedToAlbum.set(targetAlbumId, new Set());
+            // Update voice sample later if voice is mapped
+            if(voiceAlsoMappedToNew && associatedVoice) updateVoiceSample(targetAlbum, associatedVoice, mediaItemToAdd);
+
         } else {
             targetAlbumId = faceMap.assignedAlbumId;
             targetAlbum = albumsMap.get(targetAlbumId);
@@ -489,52 +545,26 @@ async function createOrUpdateAlbumsFromReview(
             console.log(` -> Assigning face ${faceMap.tempFaceId} (from ${mediaItemToAdd.alt}) to album '${targetAlbum.name}' (${targetAlbumId})`);
         }
 
-        const serializableMediaItemToAdd = { ...mediaItemToAdd, file: undefined };
-        const mediaExistsInAlbum = targetAlbum.media.some(m => m.id === serializableMediaItemToAdd.id);
-
-        if (!mediaExistsInAlbum) {
-            targetAlbum.media.push(serializableMediaItemToAdd);
-            targetAlbum.mediaCount = targetAlbum.media.length;
-            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id);
-            console.log(`   - Added media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) to album ${targetAlbumId}`);
-
-             if (analyzedFace.imageDataUrl && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
-                 targetAlbum.coverImage = analyzedFace.imageDataUrl;
-                 console.log(`   - Updated cover image for album ${targetAlbumId} with face crop.`);
-             } else if ((serializableMediaItemToAdd.type === 'image' || serializableMediaItemToAdd.type === 'video') && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
-                 targetAlbum.coverImage = serializableMediaItemToAdd.url;
-                 console.log(`   - Updated cover image for album ${targetAlbumId} with media URL.`);
-            }
-
+        // Add media, update cover, update voice
+        if (addMediaToAlbum(targetAlbum, mediaItemToAdd)) {
+            updateCoverImage(targetAlbum, analyzedFace, mediaItemToAdd);
+            // Update voice only if the voice from the same media is mapped to *this* album
             const associatedVoice = resultContainingFace.analyzedVoice;
-            const voiceMapping = userDecisions.voiceMappings.find(vm => vm.tempVoiceId === associatedVoice?.tempId);
-            if (!targetAlbum.voiceSampleUrl && associatedVoice && voiceMapping?.assignedAlbumId === targetAlbumId) {
-                let voiceUrl: string | null = null;
-                if (serializableMediaItemToAdd.type === 'audio') voiceUrl = serializableMediaItemToAdd.url;
-                else if (serializableMediaItemToAdd.type === 'video') {
-                    const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
-                    voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
-                }
-
-                if (voiceUrl) {
-                    targetAlbum.voiceSampleUrl = voiceUrl;
-                    targetAlbum.voiceSampleAvailable = true;
-                    console.log(`   - Set voice sample for album ${targetAlbumId} from ${serializableMediaItemToAdd.alt}`);
-                }
-            }
-        } else {
-            console.log(`   - Media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) already in album ${targetAlbumId}.`);
+             const voiceMappedToThisAlbum = userDecisions.voiceMappings.some(vm =>
+                 vm.tempVoiceId === associatedVoice?.tempId && vm.assignedAlbumId === targetAlbumId
+             );
+            if(voiceMappedToThisAlbum && associatedVoice) updateVoiceSample(targetAlbum, associatedVoice, mediaItemToAdd);
         }
     }
 
-     // --- 2. Process Direct Voice Mappings ---
+     // --- 2. Process Direct Voice Mappings (ONLY IF face wasn't mapped) ---
      for (const voiceMap of userDecisions.voiceMappings) {
         if (voiceMap.assignedAlbumId === null) {
             console.log(` -> Ignoring voice ${voiceMap.tempVoiceId} as per user decision.`);
             continue;
         }
 
-        const resultContainingVoice = analysisResults.mediaResults.find(res => res.analyzedVoice?.tempId === voiceMap.tempVoiceId);
+        const resultContainingVoice = findMediaResultByTempId(voiceMap.tempVoiceId);
         if (!resultContainingVoice) {
             console.warn(`[Processing] Could not find original media for voice ${voiceMap.tempVoiceId}. Skipping.`);
             continue;
@@ -542,8 +572,15 @@ async function createOrUpdateAlbumsFromReview(
         const mediaItemToAdd = resultContainingVoice.originalMedia;
         const analyzedVoice = resultContainingVoice.analyzedVoice!;
 
+         if (processedMediaIds.has(mediaItemToAdd.id)) {
+             console.log(` -> Media ${mediaItemToAdd.id} already processed for a face mapping. Skipping direct voice mapping for ${voiceMap.tempVoiceId}.`);
+             continue;
+         }
+
+
+        // Check if any face from the *same media* was mapped somewhere else
         const faceWasMapped = userDecisions.faceMappings.some(fm =>
-            fm.assignedAlbumId !== null &&
+            fm.assignedAlbumId !== null && // Check if the face was mapped (not ignored)
             resultContainingVoice.analyzedFaces.some(f => f.tempId === fm.tempFaceId)
         );
 
@@ -552,6 +589,7 @@ async function createOrUpdateAlbumsFromReview(
             continue;
         }
 
+        // Proceed with voice mapping only if no face from the same media was mapped
         let targetAlbum: Album | undefined;
         let targetAlbumId: string;
 
@@ -559,26 +597,21 @@ async function createOrUpdateAlbumsFromReview(
              targetAlbumId = `album_unnamed_voice_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
              console.log(` -> Creating new unnamed album (ID: ${targetAlbumId}) for voice ${voiceMap.tempVoiceId} from ${mediaItemToAdd.alt}`);
 
-             let voiceUrl : string | null = null;
-             if (mediaItemToAdd.type === 'audio') voiceUrl = mediaItemToAdd.url;
-             else if (mediaItemToAdd.type === 'video') {
-                const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
-                voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
-             }
-
              targetAlbum = {
                 id: targetAlbumId,
                 name: `Unnamed (${analyzedVoice.name || 'Voice'})`,
-                coverImage: 'https://picsum.photos/seed/voice_placeholder/200/200',
+                coverImage: 'https://picsum.photos/seed/voice_placeholder/200/200', // Default for voice-only
                 media: [],
                 mediaCount: 0,
-                voiceSampleAvailable: !!voiceUrl,
-                voiceSampleUrl: voiceUrl,
+                voiceSampleAvailable: false, // Updated below
+                voiceSampleUrl: null, // Updated below
                 summary: ''
              };
              albumsMap.set(targetAlbumId, targetAlbum);
              newUnnamedAlbums.set(targetAlbumId, targetAlbum);
              mediaAddedToAlbum.set(targetAlbumId, new Set());
+             updateVoiceSample(targetAlbum, analyzedVoice, mediaItemToAdd); // Set voice sample for new album
+
         } else {
            targetAlbumId = voiceMap.assignedAlbumId;
            targetAlbum = albumsMap.get(targetAlbumId);
@@ -589,38 +622,16 @@ async function createOrUpdateAlbumsFromReview(
             console.log(` -> Assigning voice ${voiceMap.tempVoiceId} (from ${mediaItemToAdd.alt}) directly to album '${targetAlbum.name}' (${targetAlbumId})`);
         }
 
-        const serializableMediaItemToAdd = { ...mediaItemToAdd, file: undefined };
-        const mediaExistsInAlbum = targetAlbum.media.some(m => m.id === serializableMediaItemToAdd.id);
-        if (!mediaExistsInAlbum) {
-            targetAlbum.media.push(serializableMediaItemToAdd);
-            targetAlbum.mediaCount = targetAlbum.media.length;
-            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id);
-            console.log(`   - Added media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) to album ${targetAlbumId} via voice mapping.`);
-
-            if (!targetAlbum.voiceSampleUrl) {
-                let voiceUrl : string | null = null;
-                if (serializableMediaItemToAdd.type === 'audio') voiceUrl = serializableMediaItemToAdd.url;
-                else if (serializableMediaItemToAdd.type === 'video') {
-                     const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
-                     voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
-                }
-                if (voiceUrl) {
-                    targetAlbum.voiceSampleUrl = voiceUrl;
-                    targetAlbum.voiceSampleAvailable = true;
-                     console.log(`   - Set voice sample for album ${targetAlbumId} from ${serializableMediaItemToAdd.alt}`);
-                }
-            }
-             if ((serializableMediaItemToAdd.type === 'image' || serializableMediaItemToAdd.type === 'video') && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
-                targetAlbum.coverImage = serializableMediaItemToAdd.url;
-                console.log(`   - Updated cover image for album ${targetAlbumId} with media URL.`);
-             }
-        } else {
-             console.log(`   - Media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) already in album ${targetAlbumId}.`);
+        // Add media, update cover, update voice
+        if (addMediaToAlbum(targetAlbum, mediaItemToAdd)) {
+            updateCoverImage(targetAlbum, null, mediaItemToAdd); // No face data for cover here
+            updateVoiceSample(targetAlbum, analyzedVoice, mediaItemToAdd);
         }
    }
 
     const finalAlbums = Array.from(albumsMap.values());
-    const serializableFinalAlbums = finalAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
+     // Final serialization check before returning
+    const serializableFinalAlbums = finalAlbums.map(a => JSON.parse(JSON.stringify(a)));
 
     console.log("[Processing] Albums after face/voice review:", serializableFinalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount })));
     return { updatedAlbums: serializableFinalAlbums, mediaAddedToAlbum, newUnnamedAlbums };
@@ -641,7 +652,8 @@ export async function linkChatsToAlbumsFromReview(
     currentAlbums: Album[]
 ): Promise<Album[]> {
      console.log("[Processing] Linking chats based on review decisions:", userDecisions.chatLinks);
-     const albumsMap = new Map(currentAlbums.map(a => [a.id, { ...a, media: a.media.map(m => ({...m, file: undefined})) }]));
+      // Work with a mutable map, starting with serializable albums
+     const albumsMap = new Map(currentAlbums.map(a => [a.id, JSON.parse(JSON.stringify(a))])); // Deep copy
 
      for (const chatDecision of userDecisions.chatLinks) {
         if (chatDecision.linkedAlbumId === null || chatDecision.linkedAlbumId === 'none') {
@@ -662,18 +674,19 @@ export async function linkChatsToAlbumsFromReview(
         }
 
         try {
+             // Simulate storing the chat content and getting a persistent URL/identifier
              const safeFileName = chatInfo.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
              const persistentChatUrl = `persistent/chat/${chatInfo.fileId}_${safeFileName}`;
-             console.log(`   - Simulating storage: ${chatInfo.fileName} stored at ${persistentChatUrl}`);
+             console.log(`   - Simulating storage: ${chatInfo.fileName} content stored at ${persistentChatUrl}`);
 
              const chatMediaItem: MediaItem = {
                  id: `chat_${chatInfo.fileId}_${Date.now()}`,
                  type: 'chat',
-                 url: persistentChatUrl,
+                 url: persistentChatUrl, // This URL now represents the stored chat content
                  alt: `Chat: ${chatInfo.fileName}`,
                  source: chatInfo.source,
-                 chatData: chatInfo.chatContent,
-                 file: undefined
+                 chatData: chatInfo.chatContent, // Include content for potential display later
+                 file: undefined // Ensure no File object
              };
 
              if (!targetAlbum.media.some(m => m.type === 'chat' && m.url === chatMediaItem.url)) {
@@ -690,7 +703,9 @@ export async function linkChatsToAlbumsFromReview(
      }
 
      const updatedAlbums = Array.from(albumsMap.values());
-     const serializableUpdatedAlbums = updatedAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
+     // Final serialization check
+     const serializableUpdatedAlbums = updatedAlbums.map(a => JSON.parse(JSON.stringify(a)));
+
 
      console.log("[Processing] Albums after linking chats:", serializableUpdatedAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount, hasChat: a.media.some(m=>m.type==='chat') })));
      return serializableUpdatedAlbums;
@@ -705,7 +720,7 @@ export async function linkChatsToAlbumsFromReview(
  * @returns Promise resolving when all summaries are attempted. Updates albums in place.
  */
 async function generateAlbumSummaries(
-    albumsToSummarize: Album[],
+    albumsToSummarize: Album[], // This should be the mutable list/map
     mediaAddedToAlbum: Map<string, Set<string | number>>,
     newUnnamedAlbums: Map<string, Album>
 ): Promise<void> {
@@ -713,32 +728,50 @@ async function generateAlbumSummaries(
     const summaryPromises: Promise<void>[] = [];
 
     for (const album of albumsToSummarize) {
+         // Determine if the album was actually modified in *this* run
         const wasMediaAddedThisRun = (mediaAddedToAlbum.get(album.id)?.size ?? 0) > 0;
-        const isNewAlbum = newUnnamedAlbums.has(album.id);
-        const needsSummaryUpdate = isNewAlbum || wasMediaAddedThisRun || !album.summary;
+        const isNewAlbumThisRun = newUnnamedAlbums.has(album.id);
+        // Trigger summary if it's new, or if media was added, or if summary is missing/failed previously
+        const needsSummaryUpdate = isNewAlbumThisRun || wasMediaAddedThisRun || !album.summary || album.summary.startsWith('[Summary generation failed');
+
 
         if (needsSummaryUpdate && album.media.length > 0) {
-            console.log(` -> Queueing summary generation for ${isNewAlbum ? 'new' : 'updated'} album ${album.id} ('${album.name}')`);
+            console.log(` -> Queueing summary generation for ${isNewAlbumThisRun ? 'new' : 'updated'} album ${album.id} ('${album.name}')`);
             summaryPromises.push(
                 (async () => {
                     try {
+                         // Generate a more descriptive input for the summary
                         const mediaTypes = [...new Set(album.media.map(m => m.type))].join(', ');
-                        const description = `Album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}, containing ${album.mediaCount} items. Media types: ${mediaTypes}. ${album.voiceSampleAvailable ? 'Voice sample available.' : ''}`;
+                        const imageCount = album.media.filter(m => m.type === 'image').length;
+                        const videoCount = album.media.filter(m => m.type === 'video').length;
+                        const audioCount = album.media.filter(m => m.type === 'audio').length;
+                        const chatCount = album.media.filter(m => m.type === 'chat').length;
+
+                        let description = `Summarize the content of this album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}. `;
+                        description += `It contains ${album.mediaCount} items: ${imageCount} images, ${videoCount} videos, ${audioCount} audio files, and ${chatCount} chats. `;
+                        if (album.voiceSampleAvailable) description += `A voice sample is available. `;
+                         // Maybe add first few chat lines if available? Could be too long.
+                         // Consider adding keywords from media analysis if available in the future.
 
                         const summaryResult = await summarizeAlbumContent({ albumDescription: description });
+                         // Mutate the album object directly (assuming albumsToSummarize is mutable)
                         album.summary = summaryResult.summary;
                         console.log(` -> Summary generated for album ${album.id}: "${album.summary.substring(0, 50)}..."`);
                     } catch (error) {
                         console.error(`[Processing] AI Summary Generation Failed for album ${album.id}:`, error);
+                         // Mutate the album object directly
                         album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'AI error'}]`;
                     }
                 })()
             );
+        } else if (needsSummaryUpdate && album.media.length === 0) {
+             console.log(` -> Skipping summary generation for album ${album.id} ('${album.name}') as it has no media.`);
+             album.summary = "[Album is empty]"; // Update summary for empty albums
         }
     }
 
     await Promise.all(summaryPromises);
-    console.log("[Processing] Summary generation complete.");
+    console.log("[Processing] Summary generation attempts complete.");
 }
 
 
@@ -758,7 +791,7 @@ export async function finalizeUploadProcessing(
     try {
         console.log("[Finalize] Starting final processing with user decisions...");
 
-        // --- Step 0: Verify Serializability (should be done before calling this ideally) ---
+        // --- Step 0: Verify Serializability (Defensive Check) ---
          try {
              JSON.stringify(analysisResults);
              JSON.stringify(userDecisions);
@@ -768,59 +801,60 @@ export async function finalizeUploadProcessing(
              return { success: false, error: `Internal Server Error: Input data could not be processed (serialization failed: ${stringifyError instanceof Error ? stringifyError.message : String(stringifyError)})` };
          }
 
-
-        // Validate analysisResults structure more robustly
-        if (!analysisResults || typeof analysisResults !== 'object' ||
-            !Array.isArray(analysisResults.mediaResults) ||
-            !Array.isArray(analysisResults.chatFilesToLink) ||
-            !Array.isArray(analysisResults.existingAlbums)) {
-             throw new Error("Invalid analysisResults structure received during finalization.");
-        }
-
         // --- Step 1: Fetch current state of albums ---
         const existingAlbumsRaw = await fetchAlbumsFromDatabase();
-        const existingAlbums = existingAlbumsRaw.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
+        // Crucially, ensure fetched albums are also prepped for modification (deep copy if needed)
+        // and are serializable (no File objects)
+        const existingAlbums = existingAlbumsRaw.map(a => JSON.parse(JSON.stringify(a)));
+
+
         console.log(`[Finalize] Fetched ${existingAlbums.length} existing albums.`);
 
         // --- Step 2: Create/Update Albums based on face/voice mappings ---
+        // This function should return a *new* array/map reflecting the changes
         const { updatedAlbums: albumsAfterFaceVoice, mediaAddedToAlbum, newUnnamedAlbums } = await createOrUpdateAlbumsFromReview(
             userDecisions,
             analysisResults,
-            existingAlbums
+            existingAlbums // Pass the serializable, mutable copy
         );
         console.log("[Finalize] Album creation/update based on face/voice review complete.");
 
         // --- Step 3: Link Chats based on review decisions ---
+        // Pass the result from the previous step
         let albumsAfterChatLinking = await linkChatsToAlbumsFromReview(
             userDecisions,
             analysisResults,
-            albumsAfterFaceVoice
+            albumsAfterFaceVoice // Pass the updated list
         );
         console.log("[Finalize] Chat linking complete.");
 
         // --- Step 4: Generate Summaries ---
+        // Pass the *latest* version of the albums list
         await generateAlbumSummaries(albumsAfterChatLinking, mediaAddedToAlbum, newUnnamedAlbums);
         console.log("[Finalize] Summary generation attempted.");
 
         // --- Step 5: Persist all changes to the database ---
+        // Pass the final, fully updated list
         await saveAlbumsToDatabase(albumsAfterChatLinking);
         console.log("[Finalize] Final albums persisted to database.");
 
-        // --- Step 6: Clean up (Optional) ---
+        // --- Step 6: Return Success ---
         console.log("[Finalize] Upload processing finished successfully.");
 
-        const serializableFinalAlbums = albumsAfterChatLinking.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
-        return { success: true, updatedAlbums: serializableFinalAlbums };
+        // Ensure the final returned albums are serializable (should be if handled correctly in steps)
+        const finalSerializableAlbums = albumsAfterChatLinking.map(a => JSON.parse(JSON.stringify(a)));
+        return { success: true, updatedAlbums: finalSerializableAlbums };
 
     } catch (error) {
         // --- Catch any error during the finalization process ---
         console.error("[Finalize Action Error] An error occurred during finalizeUploadProcessing:", error);
-        // Log the specific error on the server
         let clientErrorMessage = "An error occurred while finalizing the upload.";
         if (error instanceof Error) {
-             clientErrorMessage = `An error occurred while finalizing: ${error.message}`; // Be careful about leaking sensitive info
+             // Be cautious about leaking internal details
+             clientErrorMessage = `Failed to finalize upload: ${error.message}`;
         }
         // Return a structured error to the client
         return { success: false, error: clientErrorMessage };
     }
 }
+
