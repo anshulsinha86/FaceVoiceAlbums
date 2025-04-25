@@ -6,11 +6,11 @@
 export type MediaItem = {
   id: string | number;
   type: 'image' | 'video' | 'audio' | 'chat';
-  url: string; // URL for image/video/audio, or identifier for chat data
+  url: string; // URL for image/video/audio, or persistent identifier for chat data
   alt: string;
-  chatData?: string; // Content for chat type
+  chatData?: string; // Content for chat type (loaded when needed or during processing)
   source?: 'whatsapp' | 'instagram' | 'facebook' | 'upload'; // Origin of the chat or if it was a direct upload
-  file?: File; // Keep the original File object if needed temporarily client-side
+  file?: File; // Keep the original File object ONLY temporarily client-side or during initial server-side processing
 };
 
 /**
@@ -22,20 +22,21 @@ export type Album = {
   mediaCount: number;
   voiceSampleAvailable: boolean;
   coverImage: string; // URL of the face thumbnail or representative image
-  media: MediaItem[]; // Media items belonging to this album
+  media: MediaItem[]; // Media items belonging to this album (should NOT contain File objects in persistent state)
   voiceSampleUrl: string | null; // URL to a representative voice sample
   summary?: string; // AI-generated summary
 };
 
 /**
  * Represents a chat file prepared for linking during upload/review.
- * Different from MediaItem of type 'chat' which exists *within* an album.
+ * Contains necessary info for display and linking, excluding the non-serializable File object after analysis.
  */
 export type ChatFileLinkInfo = {
-    fileId: string; // Temporary identifier based on File object (e.g., name + lastModified)
+    fileId: string; // Temporary identifier based on File object used during the upload/analysis lifecycle
     fileName: string;
-    file: File; // Keep the original file object
+    // file: File; // REMOVED: File object is not serializable and should not be passed back to client
     source: 'whatsapp' | 'instagram' | 'facebook' | 'upload'; // Default source if not detected
+    chatContent: string; // Store the actual content read during analysis
     // This is the user's selection *during* the review step
     selectedAlbumId: string | 'new_unnamed' | null;
 };
@@ -66,20 +67,22 @@ export interface AnalyzedVoice {
 
 /**
  * Represents the analysis results for a single uploaded media file.
+ * Contains persistent URLs and analysis data, removing the File object.
  */
 export interface MediaAnalysisResult {
-    originalMedia: MediaItem; // The originally uploaded item (with File object)
+    originalMedia: MediaItem; // Contains persistent URL, File object removed
     analyzedFaces: AnalyzedFace[];
     analyzedVoice: AnalyzedVoice | null;
 }
 
 /**
  * Structure holding the results of the analysis phase, passed to the review modal.
+ * All data within this structure MUST be serializable.
  */
 export interface UploadAnalysisResults {
-    mediaResults: MediaAnalysisResult[];
-    chatFilesToLink: ChatFileLinkInfo[];
-    existingAlbums: Album[]; // To populate dropdowns for matching
+    mediaResults: MediaAnalysisResult[]; // Contains processed MediaItems without File objects
+    chatFilesToLink: ChatFileLinkInfo[]; // Contains processed ChatFileLinkInfo without File objects
+    existingAlbums: Album[]; // To populate dropdowns for matching (ensure MediaItems inside don't have File objects)
 }
 
 
@@ -91,4 +94,3 @@ export interface UserReviewDecisions {
      voiceMappings: { tempVoiceId: string; assignedAlbumId: string | 'new_unnamed' | null }[]; // If associating voices directly
      chatLinks: { fileId: string; linkedAlbumId: string | null }[]; // fileId matches ChatFileLinkInfo.fileId
 }
-

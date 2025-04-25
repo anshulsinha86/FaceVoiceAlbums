@@ -1,4 +1,5 @@
 
+
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
@@ -19,6 +20,7 @@ export default function UploadPage() {
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0); // Optional: for finer progress
+  // Store the serializable results received from the server
   const [analysisResults, setAnalysisResults] = useState<UploadAnalysisResults | null>(null);
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
@@ -53,11 +55,13 @@ export default function UploadPage() {
           setAnalysisProgress(prev => Math.min(prev + 10, 90)); // Simulate progress up to 90%
       }, 300);
 
+      // IMPORTANT: analyzeUploadedFiles MUST return serializable data.
+      // The File objects should be processed and removed within this server action.
       const results = await analyzeUploadedFiles(Array.from(selectedFiles));
       clearInterval(progressInterval); // Stop simulation
       setAnalysisProgress(100); // Mark as complete
 
-      setAnalysisResults(results);
+      setAnalysisResults(results); // Store the serializable results
       setIsReviewModalOpen(true); // Open the review modal with the results
       toast({
         title: 'Analysis Complete',
@@ -91,6 +95,7 @@ export default function UploadPage() {
      console.log("Finalizing with decisions:", userDecisions);
 
      try {
+         // Ensure analysisResults passed here is the serializable version stored in state
          const result = await finalizeUploadProcessing(userDecisions, analysisResults);
 
          if (result.success) {
@@ -212,6 +217,7 @@ export default function UploadPage() {
       </div>
 
         {/* Review Modal */}
+        {/* Pass the analysisResults stored in state, which is guaranteed to be serializable */}
         {analysisResults && (
              <UploadReviewModal
                 isOpen={isReviewModalOpen}
@@ -224,3 +230,4 @@ export default function UploadPage() {
     </>
   );
 }
+
