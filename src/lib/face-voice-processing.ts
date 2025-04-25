@@ -382,7 +382,7 @@ export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<Uploa
      } catch (e) {
          console.error("[Analysis] CRITICAL ERROR: Analysis results are not serializable!", e);
          // Throw a specific error or return a structured error object
-         throw new Error(`Failed to serialize analysis results: ${e instanceof Error ? e.message : e}`);
+         throw new Error(`Failed to serialize analysis results: ${e instanceof Error ? e.message : String(e)}`);
      }
 
 
@@ -404,7 +404,7 @@ async function createOrUpdateAlbumsFromReview(
     userDecisions: UserReviewDecisions,
     analysisResults: UploadAnalysisResults,
     existingAlbums: Album[]
-): Promise<Album[]> {
+): Promise<{ updatedAlbums: Album[], mediaAddedToAlbum: Map<string, Set<string | number>>, newUnnamedAlbums: Map<string, Album>}> {
     console.log("[Processing] Applying face/voice review decisions to albums...");
     // Use a Map for efficient lookup and update. Ensure deep copy includes removing File objects from media.
     const albumsMap: Map<string, Album> = new Map(
@@ -626,51 +626,13 @@ async function createOrUpdateAlbumsFromReview(
         }
    }
 
-    // --- 3. Generate Summaries for New/Updated Albums ---
-    console.log("[Processing] Generating summaries for new/updated albums...");
-    const summaryPromises: Promise<void>[] = [];
-
-    for (const album of albumsMap.values()) {
-        // Check if any media was added *this run* OR if it's a brand new album
-        const wasMediaAddedThisRun = (mediaAddedToAlbum.get(album.id)?.size ?? 0) > 0;
-        const isNewAlbum = newUnnamedAlbums.has(album.id);
-        // Regenerate summary if it's new, or media was added, or if it currently has no summary
-        const needsSummaryUpdate = isNewAlbum || wasMediaAddedThisRun || !album.summary;
-
-
-        if (needsSummaryUpdate && album.media.length > 0) {
-            console.log(` -> Queueing summary generation for ${isNewAlbum ? 'new' : 'updated'} album ${album.id} ('${album.name}')`);
-            summaryPromises.push(
-                (async () => { // Wrap in async IIFE to handle errors per album
-                    try {
-                        // Simple description based on current state
-                        const mediaTypes = [...new Set(album.media.map(m => m.type))].join(', ');
-                        const description = `Album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}, containing ${album.mediaCount} items. Media types: ${mediaTypes}. ${album.voiceSampleAvailable ? 'Voice sample available.' : ''}`;
-
-                        const summaryResult = await summarizeAlbumContent({ albumDescription: description });
-                        album.summary = summaryResult.summary;
-                        console.log(` -> Summary generated for album ${album.id}: "${album.summary.substring(0, 50)}..."`);
-                    } catch (error) {
-                        console.error(`[Processing] AI Summary Generation Failed for album ${album.id}:`, error);
-                        album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'AI error'}]`; // Set error message in summary
-                    }
-                })()
-            );
-        }
-    }
-
-    await Promise.all(summaryPromises); // Wait for all summaries to complete (or fail)
-    console.log("[Processing] Summary generation complete.");
-
-
     const finalAlbums = Array.from(albumsMap.values());
     // Ensure the returned albums are serializable (double-check media items)
     const serializableFinalAlbums = finalAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
 
-    console.log("[Processing] Albums after face/voice review:", serializableFinalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount, summary: a.summary?.substring(0, 30) })));
-    return serializableFinalAlbums;
+    console.log("[Processing] Albums after face/voice review:", serializableFinalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount })));
+    return { updatedAlbums: serializableFinalAlbums, mediaAddedToAlbum, newUnnamedAlbums };
 }
-
 
 /**
  * Links chat files to albums based on user decisions from the review step.
@@ -752,8 +714,55 @@ export async function linkChatsToAlbumsFromReview(
 
 
 /**
+ * Generates AI summaries for albums that need them.
+ * @param albumsToSummarize List of albums (potentially new or updated).
+ * @param mediaAddedToAlbum Map tracking which media was added to which album in this batch.
+ * @param newUnnamedAlbums Map tracking newly created albums in this batch.
+ * @returns Promise resolving when all summaries are attempted. Updates albums in place.
+ */
+async function generateAlbumSummaries(
+    albumsToSummarize: Album[],
+    mediaAddedToAlbum: Map<string, Set<string | number>>,
+    newUnnamedAlbums: Map<string, Album>
+): Promise<void> {
+    console.log("[Processing] Generating summaries for new/updated albums...");
+    const summaryPromises: Promise<void>[] = [];
+
+    for (const album of albumsToSummarize) {
+        const wasMediaAddedThisRun = (mediaAddedToAlbum.get(album.id)?.size ?? 0) > 0;
+        const isNewAlbum = newUnnamedAlbums.has(album.id);
+        // Regenerate summary if it's new, or media was added, or if it currently has no summary
+        const needsSummaryUpdate = isNewAlbum || wasMediaAddedThisRun || !album.summary;
+
+        if (needsSummaryUpdate && album.media.length > 0) {
+            console.log(` -> Queueing summary generation for ${isNewAlbum ? 'new' : 'updated'} album ${album.id} ('${album.name}')`);
+            summaryPromises.push(
+                (async () => { // Wrap in async IIFE to handle errors per album
+                    try {
+                        // Simple description based on current state
+                        const mediaTypes = [...new Set(album.media.map(m => m.type))].join(', ');
+                        const description = `Album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}, containing ${album.mediaCount} items. Media types: ${mediaTypes}. ${album.voiceSampleAvailable ? 'Voice sample available.' : ''}`;
+
+                        const summaryResult = await summarizeAlbumContent({ albumDescription: description });
+                        album.summary = summaryResult.summary;
+                        console.log(` -> Summary generated for album ${album.id}: "${album.summary.substring(0, 50)}..."`);
+                    } catch (error) {
+                        console.error(`[Processing] AI Summary Generation Failed for album ${album.id}:`, error);
+                        album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'AI error'}]`; // Set error message in summary
+                    }
+                })()
+            );
+        }
+    }
+
+    await Promise.all(summaryPromises); // Wait for all summaries to complete (or fail)
+    console.log("[Processing] Summary generation complete.");
+}
+
+
+/**
  * Orchestrates the final processing after user review:
- * Fetches current albums, updates/creates albums based on face/voice, links chats, and persists changes.
+ * Fetches current albums, updates/creates albums based on face/voice, links chats, generates summaries, and persists changes.
  *
  * @param userDecisions The decisions made by the user in the review modal.
  * @param analysisResults The results from the initial analysis phase (MUST be serializable).
@@ -764,7 +773,7 @@ export async function finalizeUploadProcessing(
     analysisResults: UploadAnalysisResults,
 ): Promise<{ success: boolean; updatedAlbums?: Album[]; error?: string }> {
     console.log("[Finalize] Starting final processing with user decisions...");
-    console.log("[Finalize] User Decisions:", JSON.stringify(userDecisions, null, 2)); // Log decisions for debugging
+    // console.log("[Finalize] User Decisions:", JSON.stringify(userDecisions, null, 2)); // Log decisions for debugging
 
     // --- Step 0: Explicitly check serializability of analysisResults ---
      try {
@@ -772,14 +781,14 @@ export async function finalizeUploadProcessing(
          console.log("[Finalize] analysisResults parameter verified as serializable.");
      } catch (stringifyError) {
          console.error("[Finalize] CRITICAL ERROR: Received non-serializable analysisResults!", stringifyError);
-         return { success: false, error: `Internal Server Error: Analysis results could not be processed (serialization failed: ${stringifyError instanceof Error ? stringifyError.message : stringifyError})` };
+         return { success: false, error: `Internal Server Error: Analysis results could not be processed (serialization failed: ${stringifyError instanceof Error ? stringifyError.message : String(stringifyError)})` };
      }
 
 
     try {
-        // Validate analysisResults structure (basic check remains useful)
+        // Validate analysisResults structure
         if (!analysisResults || !analysisResults.mediaResults || !analysisResults.chatFilesToLink || !analysisResults.existingAlbums) {
-             throw new Error("Invalid analysisResults structure received.");
+             throw new Error("Invalid analysisResults structure received during finalization.");
         }
 
         // --- Step 1: Fetch current state of albums ---
@@ -789,7 +798,7 @@ export async function finalizeUploadProcessing(
         console.log(`[Finalize] Fetched ${existingAlbums.length} existing albums.`);
 
         // --- Step 2: Create/Update Albums based on face/voice mappings ---
-        let albumsAfterFaceVoice = await createOrUpdateAlbumsFromReview(
+        const { updatedAlbums: albumsAfterFaceVoice, mediaAddedToAlbum, newUnnamedAlbums } = await createOrUpdateAlbumsFromReview(
             userDecisions,
             analysisResults,
             existingAlbums // Pass the serializable version
@@ -797,35 +806,43 @@ export async function finalizeUploadProcessing(
         console.log("[Finalize] Album creation/update based on face/voice review complete.");
 
         // --- Step 3: Link Chats based on review decisions ---
-        let finalAlbums = await linkChatsToAlbumsFromReview(
+        let albumsAfterChatLinking = await linkChatsToAlbumsFromReview(
             userDecisions,
             analysisResults,
             albumsAfterFaceVoice // Use the state after face/voice mapping (already serializable)
         );
         console.log("[Finalize] Chat linking complete.");
 
-        // --- Step 4: Persist all changes to the database ---
-        await saveAlbumsToDatabase(finalAlbums); // saveAlbumsToDatabase should handle making it serializable
+        // --- Step 4: Generate Summaries ---
+        // Pass the albums *after* chat linking, but use the media tracking maps from the face/voice step
+        await generateAlbumSummaries(albumsAfterChatLinking, mediaAddedToAlbum, newUnnamedAlbums);
+        console.log("[Finalize] Summary generation attempted.");
+
+        // --- Step 5: Persist all changes to the database ---
+        await saveAlbumsToDatabase(albumsAfterChatLinking); // saveAlbumsToDatabase should handle making it serializable
         console.log("[Finalize] Final albums persisted to database.");
 
-        // --- Step 5: Clean up (Optional) ---
+        // --- Step 6: Clean up (Optional) ---
         console.log("[Finalize] Upload processing finished successfully.");
 
         // Return only serializable data (final check, although internal functions should ensure this)
-        const serializableFinalAlbums = finalAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
+        const serializableFinalAlbums = albumsAfterChatLinking.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
         return { success: true, updatedAlbums: serializableFinalAlbums };
 
     } catch (error) {
         console.error("[Finalize] Error during final upload processing:", error);
-        // Avoid sending potentially sensitive internal error details to the client
-        const clientErrorMessage = error instanceof Error ? error.message : "An unknown error occurred during final processing.";
-        // Provide a slightly more generic error message unless it's a specific known issue like serialization failure
-        if (clientErrorMessage.includes("serialization failed")) {
-             return { success: false, error: clientErrorMessage };
+        let clientErrorMessage = "An unknown error occurred during final processing.";
+        if (error instanceof Error) {
+            // Provide slightly more specific (but still safe) messages for known issues
+            if (error.message.includes("Invalid analysisResults structure")) {
+                clientErrorMessage = "Error: Invalid data received for final processing.";
+            } else if (error.message.includes("Failed to serialize")) {
+                 clientErrorMessage = "Error: Could not serialize data during final processing.";
+            } else {
+                // Keep other errors generic for security
+                 clientErrorMessage = "An error occurred while finalizing the upload.";
+            }
         }
-        return { success: false, error: "An error occurred while finalizing the upload. Please check server logs." };
+        return { success: false, error: `${clientErrorMessage} Please check server logs for details.` };
     }
 }
-
-
-    
