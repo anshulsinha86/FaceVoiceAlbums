@@ -45,15 +45,11 @@ export function MediaViewerModal({ media, isOpen, onClose }: MediaViewerModalPro
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl w-[90vw] h-[85vh] p-0 gap-0 flex flex-col !rounded-lg overflow-hidden">
-        {/* Custom Header for better control if needed, otherwise DialogTitle works */}
-        {/* <DialogHeader className="p-4 border-b flex flex-row justify-between items-center bg-card">
-          <DialogTitle className="truncate">{media.alt || 'Media Viewer'}</DialogTitle>
-           <DialogClose asChild>
-               <Button variant="ghost" size="icon">
-                 <X className="h-4 w-4" />
-               </Button>
-           </DialogClose>
-        </DialogHeader> */}
+        {/* Add DialogHeader and DialogTitle for accessibility */}
+        {/* Visually hide the title but make it available to screen readers */}
+        <DialogHeader className="sr-only">
+          <DialogTitle>{media.alt || 'Media Viewer'}</DialogTitle>
+        </DialogHeader>
 
         {/* Render the specific viewer based on type */}
         <div className="flex-grow h-full overflow-hidden">

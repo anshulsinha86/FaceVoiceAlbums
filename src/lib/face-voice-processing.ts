@@ -271,10 +271,14 @@ export async function linkChatsToAlbums(
  */
 export async function handleNewUploads(
     uploadedMediaFiles: MediaItem[],
-    chatLinkingInfo: LinkedChat[] = [] // Default to empty array if undefined
+    chatLinkingInfo: LinkedChat[] = [] // Default to empty array if undefined or null
 ) {
     console.log("Processing new uploads:", uploadedMediaFiles.map(f => f.id));
     console.log("Chat linking info:", chatLinkingInfo);
+
+    // Ensure chatLinkingInfo is always an array for safe access later
+    const safeChatLinkingInfo = Array.isArray(chatLinkingInfo) ? chatLinkingInfo : [];
+
 
     try {
         // --- Step 1: Process Media Files (Face/Voice Recognition) ---
@@ -291,9 +295,9 @@ export async function handleNewUploads(
         console.log("Album creation/update based on media complete.");
 
         // --- Step 4: Link Chats to the updated albums ---
-        // Ensure chatLinkingInfo is an array before checking length
-        if (Array.isArray(chatLinkingInfo) && chatLinkingInfo.length > 0) {
-            updatedAlbums = await linkChatsToAlbums(chatLinkingInfo, updatedAlbums);
+        // Use the safe array now
+        if (safeChatLinkingInfo.length > 0) {
+            updatedAlbums = await linkChatsToAlbums(safeChatLinkingInfo, updatedAlbums);
             console.log("Chat linking complete.");
         } else {
              console.log("No chat linking information provided or chatLinkingInfo is empty.");
