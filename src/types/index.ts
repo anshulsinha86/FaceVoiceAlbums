@@ -10,7 +10,7 @@ export type MediaItem = {
   alt: string;
   chatData?: string; // Content for chat type (loaded when needed or during processing)
   source?: 'whatsapp' | 'instagram' | 'facebook' | 'upload'; // Origin of the chat or if it was a direct upload
-  file?: File; // Keep the original File object ONLY temporarily client-side or during initial server-side processing
+  file?: File; // Optional: Keep the original File object ONLY temporarily client-side or during initial server-side processing. Should NOT be stored persistently or returned from Server Actions after processing.
 };
 
 /**
@@ -22,7 +22,8 @@ export type Album = {
   mediaCount: number;
   voiceSampleAvailable: boolean;
   coverImage: string; // URL of the face thumbnail or representative image
-  media: MediaItem[]; // Media items belonging to this album (should NOT contain File objects in persistent state)
+  // IMPORTANT: Media items stored here MUST NOT contain the 'file' property.
+  media: Omit<MediaItem, 'file'>[]; // Media items belonging to this album (ensure serializable)
   voiceSampleUrl: string | null; // URL to a representative voice sample
   summary?: string; // AI-generated summary
 };
@@ -37,7 +38,7 @@ export type ChatFileLinkInfo = {
     source: 'whatsapp' | 'instagram' | 'facebook' | 'upload'; // Default source if not detected
     chatContent: string; // Store the actual content read during analysis
     // This is the user's selection *during* the review step
-    selectedAlbumId: string | 'new_unnamed' | null;
+    selectedAlbumId: string | 'new_unnamed' | 'none' | null; // 'none' explicitly means do not link
 };
 
 /**
@@ -49,7 +50,7 @@ export interface AnalyzedFace {
   confidence: number;
   imageDataUrl?: string; // Optional: Placeholder URL or Data URL of the cropped face for display in review
   // This is the user's selection *during* the review step
-  selectedAlbumId: string | 'new_unnamed' | null; // null means 'ignore' or unassigned initially
+  selectedAlbumId: string | 'new_unnamed' | 'none' | null; // 'none' means ignore/do not assign
 }
 
 /**
@@ -60,16 +61,17 @@ export interface AnalyzedVoice {
     profileId: string; // ID from the (mock) recognition service
     name: string; // Name from the (mock) recognition service
      // This is the user's selection *during* the review step
-    selectedAlbumId: string | 'new_unnamed' | null; // Link voice to an album
+    selectedAlbumId: string | 'new_unnamed' | 'none' | null; // 'none' means ignore/do not assign
 }
 
 
 /**
  * Represents the analysis results for a single uploaded media file.
  * Contains persistent URLs and analysis data, removing the File object.
+ * MUST be serializable.
  */
 export interface MediaAnalysisResult {
-    originalMedia: MediaItem; // Contains persistent URL, File object removed
+    originalMedia: Omit<MediaItem, 'file'>; // Contains persistent URL, File object removed
     analyzedFaces: AnalyzedFace[];
     analyzedVoice: AnalyzedVoice | null;
     error?: string | null; // Optional: Record any error during this specific file's analysis
@@ -88,9 +90,10 @@ export interface UploadAnalysisResults {
 
 /**
  * Structure holding the user's decisions from the review modal, passed to the finalization step.
+ * MUST be serializable.
  */
 export interface UserReviewDecisions {
-     faceMappings: { tempFaceId: string; assignedAlbumId: string | 'new_unnamed' | null | 'none' }[]; // Added 'none'
-     voiceMappings: { tempVoiceId: string; assignedAlbumId: string | 'new_unnamed' | null | 'none' }[]; // Added 'none'
-     chatLinks: { fileId: string; linkedAlbumId: string | null | 'none' }[]; // Added 'none'
+     faceMappings: { tempFaceId: string; assignedAlbumId: string | 'new_unnamed' | 'none' | null }[]; // 'none' means ignore
+     voiceMappings: { tempVoiceId: string; assignedAlbumId: string | 'new_unnamed' | 'none' | null }[]; // 'none' means ignore
+     chatLinks: { fileId: string; linkedAlbumId: string | 'none' | null }[]; // 'none' means don't link
 }
