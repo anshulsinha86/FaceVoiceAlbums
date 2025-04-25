@@ -34,7 +34,6 @@ export type Album = {
 export type ChatFileLinkInfo = {
     fileId: string; // Temporary identifier based on File object used during the upload/analysis lifecycle
     fileName: string;
-    // file: File; // REMOVED: File object is not serializable and should not be passed back to client
     source: 'whatsapp' | 'instagram' | 'facebook' | 'upload'; // Default source if not detected
     chatContent: string; // Store the actual content read during analysis
     // This is the user's selection *during* the review step
@@ -48,7 +47,7 @@ export interface AnalyzedFace {
   tempId: string; // e.g., "face_0", "face_1" within the context of a single upload batch
   boundingBox: { x: number; y: number; width: number; height: number };
   confidence: number;
-  imageDataUrl?: string; // Optional: Data URL of the cropped face for display in review
+  imageDataUrl?: string; // Optional: Placeholder URL or Data URL of the cropped face for display in review
   // This is the user's selection *during* the review step
   selectedAlbumId: string | 'new_unnamed' | null; // null means 'ignore' or unassigned initially
 }
@@ -73,6 +72,7 @@ export interface MediaAnalysisResult {
     originalMedia: MediaItem; // Contains persistent URL, File object removed
     analyzedFaces: AnalyzedFace[];
     analyzedVoice: AnalyzedVoice | null;
+    error?: string | null; // Optional: Record any error during this specific file's analysis
 }
 
 /**
@@ -90,7 +90,7 @@ export interface UploadAnalysisResults {
  * Structure holding the user's decisions from the review modal, passed to the finalization step.
  */
 export interface UserReviewDecisions {
-     faceMappings: { tempFaceId: string; assignedAlbumId: string | 'new_unnamed' | null }[];
-     voiceMappings: { tempVoiceId: string; assignedAlbumId: string | 'new_unnamed' | null }[]; // If associating voices directly
-     chatLinks: { fileId: string; linkedAlbumId: string | null }[]; // fileId matches ChatFileLinkInfo.fileId
+     faceMappings: { tempFaceId: string; assignedAlbumId: string | 'new_unnamed' | null | 'none' }[]; // Added 'none'
+     voiceMappings: { tempVoiceId: string; assignedAlbumId: string | 'new_unnamed' | null | 'none' }[]; // Added 'none'
+     chatLinks: { fileId: string; linkedAlbumId: string | null | 'none' }[]; // Added 'none'
 }
