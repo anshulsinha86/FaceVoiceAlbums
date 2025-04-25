@@ -171,6 +171,7 @@ async function analyzeSingleMediaFile(mediaItem: MediaItem): Promise<MediaAnalys
     let analyzedFaces: AnalyzedFace[] = [];
     let analyzedVoice: AnalyzedVoice | null = null;
     const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
+    let temporaryUrlCreated = false; // Flag to track if URL.createObjectURL was used
 
     try {
         // --- Audio Extraction (for Videos) ---
@@ -236,15 +237,20 @@ async function analyzeSingleMediaFile(mediaItem: MediaItem): Promise<MediaAnalys
 
         [analyzedFaces, analyzedVoice] = await Promise.all(analysisPromises);
 
+        // Set flag if a temporary URL was created
+        if (mediaItem.url.startsWith('blob:')) {
+            temporaryUrlCreated = true;
+        }
+
     } catch (error) {
         console.error(`Error analyzing file ${file.name}:`, error);
         // Reset results on error
         analyzedFaces = [];
         analyzedVoice = null;
     } finally {
-         // Clean up temporary Object URL if it was created and no longer needed AFTER analysis
+         // Clean up temporary Object URL if it was created
          // Check if running in browser context before attempting to revoke
-        if (typeof window !== 'undefined' && typeof URL.revokeObjectURL === 'function' && mediaItem.url.startsWith('blob:')) {
+        if (temporaryUrlCreated && typeof window !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
             console.log(`Revoking temporary URL for ${mediaItem.alt}: ${mediaItem.url}`);
             try {
                  URL.revokeObjectURL(mediaItem.url);
@@ -282,112 +288,118 @@ async function analyzeSingleMediaFile(mediaItem: MediaItem): Promise<MediaAnalys
  *          All data returned MUST be serializable.
  */
 export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<UploadAnalysisResults> {
-    console.log(`[Analysis] Starting analysis for ${uploadedFiles.length} files...`);
+    // --- Top-level try-catch for the server action ---
+    try {
+        console.log(`[Analysis] Starting analysis for ${uploadedFiles.length} files...`);
 
-    const mediaItemsToAnalyze: MediaItem[] = [];
-    const chatFileInfos: {file: File, fileId: string, source: ChatFileLinkInfo['source']}[] = []; // Temp storage for chat file info
+        const mediaItemsToAnalyze: MediaItem[] = [];
+        const chatFileInfos: {file: File, fileId: string, source: ChatFileLinkInfo['source']}[] = []; // Temp storage for chat file info
 
-    // --- 1. Categorize files and create initial MediaItem/ChatFileLinkInfo objects ---
-    uploadedFiles.forEach((file, index) => {
-        // Create a more robust temporary ID for client-side tracking before final storage
-        const fileId = `upload_${Date.now()}_${index}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`; // Sanitize ID
+        // --- 1. Categorize files and create initial MediaItem/ChatFileLinkInfo objects ---
+        uploadedFiles.forEach((file, index) => {
+            const fileId = `upload_${Date.now()}_${index}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`; // Sanitize ID
 
-        let mediaType: MediaItem['type'] | null = null;
-        if (file.type.startsWith('image/')) mediaType = 'image';
-        else if (file.type.startsWith('video/')) mediaType = 'video';
-        else if (file.type.startsWith('audio/')) mediaType = 'audio';
-        else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) mediaType = 'chat';
+            let mediaType: MediaItem['type'] | null = null;
+            if (file.type.startsWith('image/')) mediaType = 'image';
+            else if (file.type.startsWith('video/')) mediaType = 'video';
+            else if (file.type.startsWith('audio/')) mediaType = 'audio';
+            else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) mediaType = 'chat';
 
-        if (mediaType && mediaType !== 'chat') {
-            let tempUrl = '';
-             // Check if running in a browser context before trying to create Object URL
-             if (typeof window !== 'undefined' && typeof URL.createObjectURL === 'function') {
-                try {
-                    tempUrl = URL.createObjectURL(file);
-                    console.log(`[Analysis] Created temporary URL for ${file.name}: ${tempUrl.substring(0, 50)}...`);
-                } catch (e) {
-                    console.error("[Analysis] Could not create Object URL:", e);
-                     tempUrl = `error://creation-failed/${file.name}`; // Use a placeholder error URL
-                }
-             } else {
-                  console.warn("[Analysis] Cannot create Object URL in this environment. Using placeholder.");
-                  tempUrl = `placeholder://env/${file.name}`; // Placeholder if not in browser
-             }
+            if (mediaType && mediaType !== 'chat') {
+                let tempUrl = '';
+                 if (typeof window !== 'undefined' && typeof URL.createObjectURL === 'function') {
+                    try {
+                        tempUrl = URL.createObjectURL(file);
+                        console.log(`[Analysis] Created temporary URL for ${file.name}: ${tempUrl.substring(0, 50)}...`);
+                    } catch (e) {
+                        console.error("[Analysis] Could not create Object URL:", e);
+                         tempUrl = `error://creation-failed/${file.name}`;
+                    }
+                 } else {
+                      console.warn("[Analysis] Cannot create Object URL in this environment. Using placeholder.");
+                      tempUrl = `placeholder://env/${file.name}`;
+                 }
 
-            mediaItemsToAnalyze.push({
-                id: fileId,
-                type: mediaType,
-                url: tempUrl,
-                alt: file.name,
-                source: 'upload',
-                file: file, // Keep File object for analysis ONLY
-            });
-        } else if (mediaType === 'chat') {
-            let source: ChatFileLinkInfo['source'] = 'upload';
-            if (file.name.toLowerCase().includes('whatsapp')) source = 'whatsapp';
-            else if (file.name.toLowerCase().includes('instagram')) source = 'instagram';
-            else if (file.name.toLowerCase().includes('facebook')) source = 'facebook';
+                mediaItemsToAnalyze.push({
+                    id: fileId,
+                    type: mediaType,
+                    url: tempUrl,
+                    alt: file.name,
+                    source: 'upload',
+                    file: file, // Keep File object for analysis ONLY
+                });
+            } else if (mediaType === 'chat') {
+                let source: ChatFileLinkInfo['source'] = 'upload';
+                if (file.name.toLowerCase().includes('whatsapp')) source = 'whatsapp';
+                else if (file.name.toLowerCase().includes('instagram')) source = 'instagram';
+                else if (file.name.toLowerCase().includes('facebook')) source = 'facebook';
 
-            chatFileInfos.push({ file, fileId, source }); // Store info temporarily
-            console.log(`[Analysis] Identified chat file: ${file.name}`);
-        } else {
-            console.warn(`[Analysis] Skipping unsupported file type: ${file.name} (${file.type})`);
-        }
-    });
+                chatFileInfos.push({ file, fileId, source }); // Store info temporarily
+                console.log(`[Analysis] Identified chat file: ${file.name}`);
+            } else {
+                console.warn(`[Analysis] Skipping unsupported file type: ${file.name} (${file.type})`);
+            }
+        });
 
-    // --- 2. Analyze Media Files Concurrently ---
-    console.log(`[Analysis] Analyzing ${mediaItemsToAnalyze.length} media files...`);
-    const analysisPromises = mediaItemsToAnalyze.map(analyzeSingleMediaFile);
-    const mediaResults = await Promise.all(analysisPromises);
-    console.log("[Analysis] Media analysis complete.");
+        // --- 2. Analyze Media Files Concurrently ---
+        console.log(`[Analysis] Analyzing ${mediaItemsToAnalyze.length} media files...`);
+        const analysisPromises = mediaItemsToAnalyze.map(analyzeSingleMediaFile);
+        const mediaResults = await Promise.all(analysisPromises);
+        console.log("[Analysis] Media analysis complete.");
 
-    // --- 3. Read Chat File Content Concurrently ---
-    console.log(`[Analysis] Reading content for ${chatFileInfos.length} chat files...`);
-    const chatFilesToLink: ChatFileLinkInfo[] = await Promise.all(
-        chatFileInfos.map(async ({ file, fileId, source }) => {
-            const content = await fetchChatContent(file);
-            return {
-                fileId: fileId,
-                fileName: file.name,
-                source: source,
-                chatContent: content, // Store the content read
-                selectedAlbumId: null, // Initialize selection
-            };
-        })
-    );
-    console.log("[Analysis] Chat content reading complete.");
-
-
-    // --- 4. Fetch Existing Albums for Linking ---
-    // This is crucial for the review modal to show existing people/albums
-    const existingAlbumsRaw = await fetchAlbumsFromDatabase();
-    // Ensure existing albums are also serializable before returning
-    const existingAlbums = existingAlbumsRaw.map(album => ({
-        ...album,
-        media: album.media.map(m => ({ ...m, file: undefined }))
-    }));
-
-    console.log(`[Analysis] Fetched ${existingAlbums.length} existing albums for review.`);
-
-    const results: UploadAnalysisResults = {
-         mediaResults, // MediaItems here already have file: undefined from analyzeSingleMediaFile
-         chatFilesToLink, // ChatFileLinkInfo never had file object
-         existingAlbums, // Albums verified serializable above
-    };
-
-     // --- 5. Final Serialization Check (Optional but recommended) ---
-     try {
-        JSON.stringify(results);
-        console.log("[Analysis] Analysis results successfully serialized.");
-     } catch (e) {
-         console.error("[Analysis] CRITICAL ERROR: Analysis results are not serializable!", e);
-         // Throw a specific error or return a structured error object
-         throw new Error(`Failed to serialize analysis results: ${e instanceof Error ? e.message : String(e)}`);
-     }
+        // --- 3. Read Chat File Content Concurrently ---
+        console.log(`[Analysis] Reading content for ${chatFileInfos.length} chat files...`);
+        const chatFilesToLink: ChatFileLinkInfo[] = await Promise.all(
+            chatFileInfos.map(async ({ file, fileId, source }) => {
+                const content = await fetchChatContent(file);
+                return {
+                    fileId: fileId,
+                    fileName: file.name,
+                    source: source,
+                    chatContent: content, // Store the content read
+                    selectedAlbumId: null, // Initialize selection
+                };
+            })
+        );
+        console.log("[Analysis] Chat content reading complete.");
 
 
-    console.log("[Analysis] Analysis phase complete. Returning SERIALIZABLE results for review modal.");
-    return results;
+        // --- 4. Fetch Existing Albums for Linking ---
+        const existingAlbumsRaw = await fetchAlbumsFromDatabase();
+        const existingAlbums = existingAlbumsRaw.map(album => ({
+            ...album,
+            media: album.media.map(m => ({ ...m, file: undefined }))
+        }));
+
+        console.log(`[Analysis] Fetched ${existingAlbums.length} existing albums for review.`);
+
+        const results: UploadAnalysisResults = {
+             mediaResults,
+             chatFilesToLink,
+             existingAlbums,
+        };
+
+         // --- 5. Final Serialization Check ---
+         try {
+            JSON.stringify(results);
+            console.log("[Analysis] Analysis results successfully serialized.");
+         } catch (e) {
+             console.error("[Analysis] CRITICAL ERROR: Analysis results are not serializable!", e);
+             throw new Error(`Failed to serialize analysis results: ${e instanceof Error ? e.message : String(e)}`);
+         }
+
+        console.log("[Analysis] Analysis phase complete. Returning SERIALIZABLE results for review modal.");
+        return results;
+
+    } catch (error) {
+        // --- Catch any error during the analysis process ---
+        console.error("[Analysis Action Error] An error occurred during analyzeUploadedFiles:", error);
+        // Re-throw the error to ensure Next.js handles it, potentially returning a structured error
+        // For now, re-throwing might still lead to "unexpected response" if not handled properly upstream,
+        // but it makes the source of the error clearer in server logs.
+        // Consider returning a specific error structure if needed later.
+        throw error; // Re-throw the caught error
+    }
 }
 
 
@@ -406,12 +418,10 @@ async function createOrUpdateAlbumsFromReview(
     existingAlbums: Album[]
 ): Promise<{ updatedAlbums: Album[], mediaAddedToAlbum: Map<string, Set<string | number>>, newUnnamedAlbums: Map<string, Album>}> {
     console.log("[Processing] Applying face/voice review decisions to albums...");
-    // Use a Map for efficient lookup and update. Ensure deep copy includes removing File objects from media.
     const albumsMap: Map<string, Album> = new Map(
         existingAlbums.map(a => [a.id, { ...a, media: a.media.map(m => ({...m, file: undefined})) }])
     );
-    const newUnnamedAlbums: Map<string, Album> = new Map(); // Track newly created albums THIS BATCH
-    // Track which media (by persistent ID) was added to which album (by ID) THIS BATCH
+    const newUnnamedAlbums: Map<string, Album> = new Map();
     const mediaAddedToAlbum: Map<string, Set<string | number>> = new Map();
     existingAlbums.forEach(album => mediaAddedToAlbum.set(album.id, new Set()));
 
@@ -420,10 +430,9 @@ async function createOrUpdateAlbumsFromReview(
     for (const faceMap of userDecisions.faceMappings) {
         if (faceMap.assignedAlbumId === null) {
             console.log(` -> Ignoring face ${faceMap.tempFaceId} as per user decision.`);
-            continue; // User chose to ignore this face
+            continue;
         }
 
-        // Find the original media item and face details using the tempFaceId
         const resultContainingFace = analysisResults.mediaResults.find(res =>
             res.analyzedFaces.some(f => f.tempId === faceMap.tempFaceId)
         );
@@ -432,51 +441,45 @@ async function createOrUpdateAlbumsFromReview(
             continue;
         }
         const analyzedFace = resultContainingFace.analyzedFaces.find(f => f.tempId === faceMap.tempFaceId)!;
-        // Use the originalMedia which now contains the persistent URL and file: undefined
         const mediaItemToAdd = resultContainingFace.originalMedia;
 
         let targetAlbum: Album | undefined;
         let targetAlbumId: string;
 
         if (faceMap.assignedAlbumId === 'new_unnamed') {
-            // --- Create a new "Unnamed" album ---
             targetAlbumId = `album_unnamed_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
             console.log(` -> Creating new unnamed album (ID: ${targetAlbumId}) for face ${faceMap.tempFaceId} from ${mediaItemToAdd.alt}`);
 
-            // Determine initial voice sample based on associated voice from the SAME media item
             const associatedVoice = resultContainingFace.analyzedVoice;
             let voiceUrl: string | null = null;
-            // Check if the voice from THIS media was ALSO assigned to 'new_unnamed'
             const voiceAssignedToNew = userDecisions.voiceMappings.some(vm =>
                 vm.tempVoiceId === associatedVoice?.tempId && vm.assignedAlbumId === 'new_unnamed'
             );
 
             if (associatedVoice && voiceAssignedToNew) {
                 if (mediaItemToAdd.type === 'audio') voiceUrl = mediaItemToAdd.url;
-                 // Use the consistent placeholder path for extracted audio
                 else if (mediaItemToAdd.type === 'video') {
-                     const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
+                     const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
                      voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
                 }
             }
 
             targetAlbum = {
                 id: targetAlbumId,
-                name: 'Unnamed', // Default name
-                coverImage: analyzedFace.imageDataUrl || // Prefer face crop
-                              (mediaItemToAdd.type === 'image' || mediaItemToAdd.type === 'video' ? mediaItemToAdd.url : '') || // Fallback to media URL
-                              'https://picsum.photos/seed/placeholder/200/200', // Generic placeholder
-                media: [], // Will be populated below
+                name: 'Unnamed',
+                coverImage: analyzedFace.imageDataUrl ||
+                              (mediaItemToAdd.type === 'image' || mediaItemToAdd.type === 'video' ? mediaItemToAdd.url : '') ||
+                              'https://picsum.photos/seed/placeholder/200/200',
+                media: [],
                 mediaCount: 0,
                 voiceSampleAvailable: !!voiceUrl,
                 voiceSampleUrl: voiceUrl,
-                summary: '' // Generate summary later
+                summary: ''
             };
             albumsMap.set(targetAlbumId, targetAlbum);
-            newUnnamedAlbums.set(targetAlbumId, targetAlbum); // Track as new this batch
-            mediaAddedToAlbum.set(targetAlbumId, new Set()); // Initialize tracking set
+            newUnnamedAlbums.set(targetAlbumId, targetAlbum);
+            mediaAddedToAlbum.set(targetAlbumId, new Set());
         } else {
-            // --- Assign to Existing Album ---
             targetAlbumId = faceMap.assignedAlbumId;
             targetAlbum = albumsMap.get(targetAlbumId);
             if (!targetAlbum) {
@@ -486,34 +489,30 @@ async function createOrUpdateAlbumsFromReview(
             console.log(` -> Assigning face ${faceMap.tempFaceId} (from ${mediaItemToAdd.alt}) to album '${targetAlbum.name}' (${targetAlbumId})`);
         }
 
-        // --- Add MediaItem to Target Album (if not already present) ---
-        // Ensure mediaItemToAdd is serializable (file should be undefined)
         const serializableMediaItemToAdd = { ...mediaItemToAdd, file: undefined };
         const mediaExistsInAlbum = targetAlbum.media.some(m => m.id === serializableMediaItemToAdd.id);
 
         if (!mediaExistsInAlbum) {
-            targetAlbum.media.push(serializableMediaItemToAdd); // Add the serializable version
+            targetAlbum.media.push(serializableMediaItemToAdd);
             targetAlbum.mediaCount = targetAlbum.media.length;
-            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id); // Mark as added this run
+            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id);
             console.log(`   - Added media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) to album ${targetAlbumId}`);
 
-            // Update cover image if needed (prefer face crop, then image/video)
              if (analyzedFace.imageDataUrl && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
                  targetAlbum.coverImage = analyzedFace.imageDataUrl;
                  console.log(`   - Updated cover image for album ${targetAlbumId} with face crop.`);
              } else if ((serializableMediaItemToAdd.type === 'image' || serializableMediaItemToAdd.type === 'video') && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
-                 targetAlbum.coverImage = serializableMediaItemToAdd.url; // Use the media URL as cover
+                 targetAlbum.coverImage = serializableMediaItemToAdd.url;
                  console.log(`   - Updated cover image for album ${targetAlbumId} with media URL.`);
             }
 
-            // Update voice sample if not already set and voice is linked to this album
             const associatedVoice = resultContainingFace.analyzedVoice;
             const voiceMapping = userDecisions.voiceMappings.find(vm => vm.tempVoiceId === associatedVoice?.tempId);
             if (!targetAlbum.voiceSampleUrl && associatedVoice && voiceMapping?.assignedAlbumId === targetAlbumId) {
                 let voiceUrl: string | null = null;
                 if (serializableMediaItemToAdd.type === 'audio') voiceUrl = serializableMediaItemToAdd.url;
                 else if (serializableMediaItemToAdd.type === 'video') {
-                    const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
+                    const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
                     voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
                 }
 
@@ -528,11 +527,11 @@ async function createOrUpdateAlbumsFromReview(
         }
     }
 
-     // --- 2. Process Direct Voice Mappings (for media where faces weren't mapped or didn't exist) ---
+     // --- 2. Process Direct Voice Mappings ---
      for (const voiceMap of userDecisions.voiceMappings) {
         if (voiceMap.assignedAlbumId === null) {
             console.log(` -> Ignoring voice ${voiceMap.tempVoiceId} as per user decision.`);
-            continue; // Ignored
+            continue;
         }
 
         const resultContainingVoice = analysisResults.mediaResults.find(res => res.analyzedVoice?.tempId === voiceMap.tempVoiceId);
@@ -540,41 +539,38 @@ async function createOrUpdateAlbumsFromReview(
             console.warn(`[Processing] Could not find original media for voice ${voiceMap.tempVoiceId}. Skipping.`);
             continue;
         }
-        const mediaItemToAdd = resultContainingVoice.originalMedia; // Already has file: undefined
+        const mediaItemToAdd = resultContainingVoice.originalMedia;
         const analyzedVoice = resultContainingVoice.analyzedVoice!;
 
-        // Check if any face from the *same media item* was already mapped to an album
         const faceWasMapped = userDecisions.faceMappings.some(fm =>
-            fm.assignedAlbumId !== null && // Ensure it was assigned, not ignored
+            fm.assignedAlbumId !== null &&
             resultContainingVoice.analyzedFaces.some(f => f.tempId === fm.tempFaceId)
         );
 
         if (faceWasMapped) {
             console.log(` -> Skipping direct voice mapping for ${voiceMap.tempVoiceId} as a face from the same media (${mediaItemToAdd.alt}) was already mapped.`);
-            continue; // Handled by face mapping logic, avoid double-adding media
+            continue;
         }
 
-        // Proceed with direct voice assignment (e.g., audio file, or video where face was ignored)
         let targetAlbum: Album | undefined;
         let targetAlbumId: string;
 
         if (voiceMap.assignedAlbumId === 'new_unnamed') {
-             // Need to create a *new* unnamed album specifically for this voice
              targetAlbumId = `album_unnamed_voice_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
              console.log(` -> Creating new unnamed album (ID: ${targetAlbumId}) for voice ${voiceMap.tempVoiceId} from ${mediaItemToAdd.alt}`);
 
              let voiceUrl : string | null = null;
              if (mediaItemToAdd.type === 'audio') voiceUrl = mediaItemToAdd.url;
              else if (mediaItemToAdd.type === 'video') {
-                const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
+                const safeFileName = mediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
                 voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
              }
 
              targetAlbum = {
                 id: targetAlbumId,
-                name: `Unnamed (${analyzedVoice.name || 'Voice'})`, // Indicate it might be voice-only initially
-                coverImage: 'https://picsum.photos/seed/voice_placeholder/200/200', // Placeholder cover
-                media: [], // Will be populated below
+                name: `Unnamed (${analyzedVoice.name || 'Voice'})`,
+                coverImage: 'https://picsum.photos/seed/voice_placeholder/200/200',
+                media: [],
                 mediaCount: 0,
                 voiceSampleAvailable: !!voiceUrl,
                 voiceSampleUrl: voiceUrl,
@@ -582,7 +578,7 @@ async function createOrUpdateAlbumsFromReview(
              };
              albumsMap.set(targetAlbumId, targetAlbum);
              newUnnamedAlbums.set(targetAlbumId, targetAlbum);
-             mediaAddedToAlbum.set(targetAlbumId, new Set()); // Initialize tracking
+             mediaAddedToAlbum.set(targetAlbumId, new Set());
         } else {
            targetAlbumId = voiceMap.assignedAlbumId;
            targetAlbum = albumsMap.get(targetAlbumId);
@@ -593,21 +589,19 @@ async function createOrUpdateAlbumsFromReview(
             console.log(` -> Assigning voice ${voiceMap.tempVoiceId} (from ${mediaItemToAdd.alt}) directly to album '${targetAlbum.name}' (${targetAlbumId})`);
         }
 
-        // Add media to the target album if it wasn't added via face mapping
         const serializableMediaItemToAdd = { ...mediaItemToAdd, file: undefined };
         const mediaExistsInAlbum = targetAlbum.media.some(m => m.id === serializableMediaItemToAdd.id);
         if (!mediaExistsInAlbum) {
-            targetAlbum.media.push(serializableMediaItemToAdd); // Add serializable version
+            targetAlbum.media.push(serializableMediaItemToAdd);
             targetAlbum.mediaCount = targetAlbum.media.length;
-            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id); // Mark as added
+            mediaAddedToAlbum.get(targetAlbumId)?.add(serializableMediaItemToAdd.id);
             console.log(`   - Added media ${serializableMediaItemToAdd.id} (${serializableMediaItemToAdd.alt}) to album ${targetAlbumId} via voice mapping.`);
 
-            // Set voice sample if not already set
             if (!targetAlbum.voiceSampleUrl) {
                 let voiceUrl : string | null = null;
                 if (serializableMediaItemToAdd.type === 'audio') voiceUrl = serializableMediaItemToAdd.url;
                 else if (serializableMediaItemToAdd.type === 'video') {
-                     const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
+                     const safeFileName = serializableMediaItemToAdd.alt.replace(/[^a-zA-Z0-9._-]/g, '_');
                      voiceUrl = `persistent/extracted_audio/${safeFileName.replace(/\.[^/.]+$/, "")}.mp3`;
                 }
                 if (voiceUrl) {
@@ -616,7 +610,6 @@ async function createOrUpdateAlbumsFromReview(
                      console.log(`   - Set voice sample for album ${targetAlbumId} from ${serializableMediaItemToAdd.alt}`);
                 }
             }
-             // Set cover image if it's still a placeholder
              if ((serializableMediaItemToAdd.type === 'image' || serializableMediaItemToAdd.type === 'video') && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
                 targetAlbum.coverImage = serializableMediaItemToAdd.url;
                 console.log(`   - Updated cover image for album ${targetAlbumId} with media URL.`);
@@ -627,7 +620,6 @@ async function createOrUpdateAlbumsFromReview(
    }
 
     const finalAlbums = Array.from(albumsMap.values());
-    // Ensure the returned albums are serializable (double-check media items)
     const serializableFinalAlbums = finalAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
 
     console.log("[Processing] Albums after face/voice review:", serializableFinalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount })));
@@ -649,14 +641,12 @@ export async function linkChatsToAlbumsFromReview(
     currentAlbums: Album[]
 ): Promise<Album[]> {
      console.log("[Processing] Linking chats based on review decisions:", userDecisions.chatLinks);
-      // Ensure deep copy and remove file objects from media
      const albumsMap = new Map(currentAlbums.map(a => [a.id, { ...a, media: a.media.map(m => ({...m, file: undefined})) }]));
 
-     // No async operations needed here if chat content is already in analysisResults
      for (const chatDecision of userDecisions.chatLinks) {
         if (chatDecision.linkedAlbumId === null || chatDecision.linkedAlbumId === 'none') {
              console.log(` -> Skipping chat link for fileId ${chatDecision.fileId} (user chose 'Don't Link').`);
-             continue; // User chose "Don't Link" or null
+             continue;
         }
 
         const chatInfo = analysisResults.chatFilesToLink.find(cf => cf.fileId === chatDecision.fileId);
@@ -672,24 +662,20 @@ export async function linkChatsToAlbumsFromReview(
         }
 
         try {
-             // --- Create MediaItem for the chat ---
-             // IMPORTANT: Simulate storing the chat file and getting a persistent URL/ID
-             const safeFileName = chatInfo.fileName.replace(/[^a-zA-Z0-9._-]/g, '_'); // Sanitize filename
-             const persistentChatUrl = `persistent/chat/${chatInfo.fileId}_${safeFileName}`; // Example persistent path/ID
+             const safeFileName = chatInfo.fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+             const persistentChatUrl = `persistent/chat/${chatInfo.fileId}_${safeFileName}`;
              console.log(`   - Simulating storage: ${chatInfo.fileName} stored at ${persistentChatUrl}`);
 
              const chatMediaItem: MediaItem = {
-                 // Use a persistent ID scheme, maybe based on hash or DB id after upload
-                 id: `chat_${chatInfo.fileId}_${Date.now()}`, // Example persistent ID
+                 id: `chat_${chatInfo.fileId}_${Date.now()}`,
                  type: 'chat',
-                 url: persistentChatUrl, // Use the persistent path/ID
+                 url: persistentChatUrl,
                  alt: `Chat: ${chatInfo.fileName}`,
                  source: chatInfo.source,
-                 chatData: chatInfo.chatContent, // Use the pre-read content
-                 file: undefined // Ensure file object is not present
+                 chatData: chatInfo.chatContent,
+                 file: undefined
              };
 
-             // --- Add Chat MediaItem to Album (prevent duplicates based on URL) ---
              if (!targetAlbum.media.some(m => m.type === 'chat' && m.url === chatMediaItem.url)) {
                 targetAlbum.media.push(chatMediaItem);
                 targetAlbum.mediaCount = targetAlbum.media.length;
@@ -700,12 +686,10 @@ export async function linkChatsToAlbumsFromReview(
 
         } catch (error) {
              console.error(`[Processing] Error linking chat file ${chatInfo.fileName}:`, error);
-             // Decide how to handle partial failures, e.g., skip this chat link
         }
      }
 
      const updatedAlbums = Array.from(albumsMap.values());
-     // Ensure the returned albums are serializable
      const serializableUpdatedAlbums = updatedAlbums.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
 
      console.log("[Processing] Albums after linking chats:", serializableUpdatedAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount, hasChat: a.media.some(m=>m.type==='chat') })));
@@ -731,15 +715,13 @@ async function generateAlbumSummaries(
     for (const album of albumsToSummarize) {
         const wasMediaAddedThisRun = (mediaAddedToAlbum.get(album.id)?.size ?? 0) > 0;
         const isNewAlbum = newUnnamedAlbums.has(album.id);
-        // Regenerate summary if it's new, or media was added, or if it currently has no summary
         const needsSummaryUpdate = isNewAlbum || wasMediaAddedThisRun || !album.summary;
 
         if (needsSummaryUpdate && album.media.length > 0) {
             console.log(` -> Queueing summary generation for ${isNewAlbum ? 'new' : 'updated'} album ${album.id} ('${album.name}')`);
             summaryPromises.push(
-                (async () => { // Wrap in async IIFE to handle errors per album
+                (async () => {
                     try {
-                        // Simple description based on current state
                         const mediaTypes = [...new Set(album.media.map(m => m.type))].join(', ');
                         const description = `Album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}, containing ${album.mediaCount} items. Media types: ${mediaTypes}. ${album.voiceSampleAvailable ? 'Voice sample available.' : ''}`;
 
@@ -748,14 +730,14 @@ async function generateAlbumSummaries(
                         console.log(` -> Summary generated for album ${album.id}: "${album.summary.substring(0, 50)}..."`);
                     } catch (error) {
                         console.error(`[Processing] AI Summary Generation Failed for album ${album.id}:`, error);
-                        album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'AI error'}]`; // Set error message in summary
+                        album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'AI error'}]`;
                     }
                 })()
             );
         }
     }
 
-    await Promise.all(summaryPromises); // Wait for all summaries to complete (or fail)
+    await Promise.all(summaryPromises);
     console.log("[Processing] Summary generation complete.");
 }
 
@@ -772,28 +754,31 @@ export async function finalizeUploadProcessing(
     userDecisions: UserReviewDecisions,
     analysisResults: UploadAnalysisResults,
 ): Promise<{ success: boolean; updatedAlbums?: Album[]; error?: string }> {
-    console.log("[Finalize] Starting final processing with user decisions...");
-    // console.log("[Finalize] User Decisions:", JSON.stringify(userDecisions, null, 2)); // Log decisions for debugging
-
-    // --- Step 0: Explicitly check serializability of analysisResults ---
-     try {
-         JSON.stringify(analysisResults);
-         console.log("[Finalize] analysisResults parameter verified as serializable.");
-     } catch (stringifyError) {
-         console.error("[Finalize] CRITICAL ERROR: Received non-serializable analysisResults!", stringifyError);
-         return { success: false, error: `Internal Server Error: Analysis results could not be processed (serialization failed: ${stringifyError instanceof Error ? stringifyError.message : String(stringifyError)})` };
-     }
-
-
+     // --- Top-level try-catch for the server action ---
     try {
-        // Validate analysisResults structure
-        if (!analysisResults || !analysisResults.mediaResults || !analysisResults.chatFilesToLink || !analysisResults.existingAlbums) {
+        console.log("[Finalize] Starting final processing with user decisions...");
+
+        // --- Step 0: Verify Serializability (should be done before calling this ideally) ---
+         try {
+             JSON.stringify(analysisResults);
+             JSON.stringify(userDecisions);
+             console.log("[Finalize] Input parameters verified as serializable.");
+         } catch (stringifyError) {
+             console.error("[Finalize] CRITICAL ERROR: Received non-serializable input!", stringifyError);
+             return { success: false, error: `Internal Server Error: Input data could not be processed (serialization failed: ${stringifyError instanceof Error ? stringifyError.message : String(stringifyError)})` };
+         }
+
+
+        // Validate analysisResults structure more robustly
+        if (!analysisResults || typeof analysisResults !== 'object' ||
+            !Array.isArray(analysisResults.mediaResults) ||
+            !Array.isArray(analysisResults.chatFilesToLink) ||
+            !Array.isArray(analysisResults.existingAlbums)) {
              throw new Error("Invalid analysisResults structure received during finalization.");
         }
 
         // --- Step 1: Fetch current state of albums ---
         const existingAlbumsRaw = await fetchAlbumsFromDatabase();
-         // Ensure fetched albums are prepared for processing (serializable)
         const existingAlbums = existingAlbumsRaw.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
         console.log(`[Finalize] Fetched ${existingAlbums.length} existing albums.`);
 
@@ -801,7 +786,7 @@ export async function finalizeUploadProcessing(
         const { updatedAlbums: albumsAfterFaceVoice, mediaAddedToAlbum, newUnnamedAlbums } = await createOrUpdateAlbumsFromReview(
             userDecisions,
             analysisResults,
-            existingAlbums // Pass the serializable version
+            existingAlbums
         );
         console.log("[Finalize] Album creation/update based on face/voice review complete.");
 
@@ -809,40 +794,33 @@ export async function finalizeUploadProcessing(
         let albumsAfterChatLinking = await linkChatsToAlbumsFromReview(
             userDecisions,
             analysisResults,
-            albumsAfterFaceVoice // Use the state after face/voice mapping (already serializable)
+            albumsAfterFaceVoice
         );
         console.log("[Finalize] Chat linking complete.");
 
         // --- Step 4: Generate Summaries ---
-        // Pass the albums *after* chat linking, but use the media tracking maps from the face/voice step
         await generateAlbumSummaries(albumsAfterChatLinking, mediaAddedToAlbum, newUnnamedAlbums);
         console.log("[Finalize] Summary generation attempted.");
 
         // --- Step 5: Persist all changes to the database ---
-        await saveAlbumsToDatabase(albumsAfterChatLinking); // saveAlbumsToDatabase should handle making it serializable
+        await saveAlbumsToDatabase(albumsAfterChatLinking);
         console.log("[Finalize] Final albums persisted to database.");
 
         // --- Step 6: Clean up (Optional) ---
         console.log("[Finalize] Upload processing finished successfully.");
 
-        // Return only serializable data (final check, although internal functions should ensure this)
         const serializableFinalAlbums = albumsAfterChatLinking.map(a => ({...a, media: a.media.map(m => ({...m, file: undefined}))}));
         return { success: true, updatedAlbums: serializableFinalAlbums };
 
     } catch (error) {
-        console.error("[Finalize] Error during final upload processing:", error);
-        let clientErrorMessage = "An unknown error occurred during final processing.";
+        // --- Catch any error during the finalization process ---
+        console.error("[Finalize Action Error] An error occurred during finalizeUploadProcessing:", error);
+        // Log the specific error on the server
+        let clientErrorMessage = "An error occurred while finalizing the upload.";
         if (error instanceof Error) {
-            // Provide slightly more specific (but still safe) messages for known issues
-            if (error.message.includes("Invalid analysisResults structure")) {
-                clientErrorMessage = "Error: Invalid data received for final processing.";
-            } else if (error.message.includes("Failed to serialize")) {
-                 clientErrorMessage = "Error: Could not serialize data during final processing.";
-            } else {
-                // Keep other errors generic for security
-                 clientErrorMessage = "An error occurred while finalizing the upload.";
-            }
+             clientErrorMessage = `An error occurred while finalizing: ${error.message}`; // Be careful about leaking sensitive info
         }
-        return { success: false, error: `${clientErrorMessage} Please check server logs for details.` };
+        // Return a structured error to the client
+        return { success: false, error: clientErrorMessage };
     }
 }
