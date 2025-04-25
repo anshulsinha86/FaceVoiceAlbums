@@ -88,10 +88,11 @@ export default function UploadPage() {
     setUploadProgress(0);
 
     const mediaFilesToProcess: MediaItem[] = [];
-    const chatFilesToLink: LinkedChat[] = [...linkedChats]; // Use the state
+    const chatFilesToLink: LinkedChat[] = [...linkedChats]; // Use the state from linkedChats
 
     const totalFiles = files.length;
     let uploadedCount = 0;
+    const allUploadedFiles: MediaItem[] = []; // Store all files as MediaItems for handleNewUploads
 
     for (let i = 0; i < totalFiles; i++) {
       const file = files[i];
@@ -100,25 +101,43 @@ export default function UploadPage() {
 
       // Determine file type for processing
       let fileType: MediaItem['type'] = 'image'; // Default guess
+      let source: MediaItem['source'] = 'upload'; // Default source
+
       if (file.type.startsWith('video/')) {
           fileType = 'video';
       } else if (file.type.startsWith('audio/')) {
           fileType = 'audio';
       } else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) { // Basic chat detection
           fileType = 'chat';
+          // Assign source from linkedChats if found
+          const chatLink = chatFilesToLink.find(link => link.fileId === file.name + file.lastModified);
+          if (chatLink) {
+            source = chatLink.source;
+          }
       }
 
-      // Add non-chat files to the processing list
-       if (fileType !== 'chat') {
-            mediaFilesToProcess.push({
-                id: `upload_${Date.now()}_${i}`, // Temporary ID for processing
-                url: URL.createObjectURL(file), // Use object URL for local preview/processing simulation
-                type: fileType,
-                alt: file.name,
-                // source: 'upload' // Implicit
-            });
-        }
-        // NOTE: Chat files are handled separately via `chatFilesToLink`
+      // Create MediaItem for every file
+      const mediaItem: MediaItem = {
+          id: `upload_${Date.now()}_${i}`, // Temporary ID for processing
+          url: URL.createObjectURL(file), // Use object URL for local preview/processing simulation
+          type: fileType,
+          alt: file.name,
+          source: source
+      };
+
+      // TODO: Implement actual file upload logic here
+      // 1. Upload the file `file` to storage (e.g., Firebase Storage)
+      // 2. Get a persistent URL/identifier for the uploaded file.
+      // 3. Replace mediaItem.url with the persistent URL.
+      // Example: mediaItem.url = await uploadFileAndGetURL(file);
+
+       // For simulation, use placeholder persistent paths
+       mediaItem.url = `persistent/path/to/${file.name}`;
+       if(fileType === 'chat') {
+            mediaItem.url = `chat_data_path/${file.name + file.lastModified}` // Match linkChatsToAlbums placeholder
+       }
+
+      allUploadedFiles.push(mediaItem);
 
       uploadedCount++;
       const progress = (uploadedCount / totalFiles) * 100;
@@ -126,35 +145,15 @@ export default function UploadPage() {
       console.log(`Simulating upload of ${file.name}...`);
     }
 
-    console.log('Media files ready for processing:', mediaFilesToProcess);
+    console.log('All uploaded files (as MediaItems):', allUploadedFiles);
     console.log('Chat files ready for linking:', chatFilesToLink);
 
-    // TODO: Implement actual file upload logic here
-    // 1. Upload all files (media and chats) to storage (e.g., Firebase Storage)
-    // 2. Get persistent URLs/identifiers for uploaded files.
-    // 3. Replace temporary URLs in `mediaFilesToProcess` with persistent ones.
-    // 4. Update `chatFilesToLink` with persistent file identifiers.
 
-    // Simulate processing and linking after successful upload
+    // Simulate processing and linking after successful upload simulation
     try {
-      // Trigger background processing for face/voice in media files
-       if (mediaFilesToProcess.length > 0) {
-         // Replace object URLs with placeholder persistent URLs before sending
-         const processedMediaWithPersistentUrls = mediaFilesToProcess.map(mf => ({
-            ...mf,
-             // Replace with actual URLs after upload
-            url: `persistent/path/to/${mf.alt}`
-         }));
-         await handleNewUploads(processedMediaWithPersistentUrls); // Call the processing function
-       }
-
-      // TODO: Send `chatFilesToLink` data to the backend to store the links
-      // The backend would save which chat file is linked to which albumId.
-       if (chatFilesToLink.length > 0) {
-           console.log("Sending chat link data to backend:", chatFilesToLink);
-           // Simulate backend call
-           await new Promise(resolve => setTimeout(resolve, 300));
-       }
+      // Trigger background processing and linking
+      // Pass ALL uploaded files and the linking info
+      await handleNewUploads(allUploadedFiles, chatFilesToLink); // Pass chatFilesToLink here
 
       toast({
         title: 'Upload Complete',

@@ -62,6 +62,7 @@ export async function processMediaFiles(mediaFiles: MediaItem[]): Promise<Proces
             }
 
             if (file.type === 'video' || file.type === 'audio') {
+                 // Use the potentially extracted audio URL
                 promises.push(
                     identifySpeaker(audioUrl).catch(err => {
                         console.error(`Voice identification failed for ${audioUrl} (from ${file.url}):`, err);
@@ -130,6 +131,17 @@ export async function createOrUpdateAlbums(
             if (!album) {
                 // --- Create New "Unnamed" Album ---
                  console.log(`Creating new unnamed album for face ID: ${faceId}`);
+                 // Determine the audio URL for the first voice sample
+                 let initialVoiceUrl: string | null = null;
+                 if (media.identifiedVoice) {
+                    if (media.type === 'audio') {
+                        initialVoiceUrl = media.url;
+                    } else if (media.type === 'video') {
+                        // Use the potentially extracted audio URL (simulated)
+                        initialVoiceUrl = `${media.url.replace(/\.\w+$/, '')}_audio.mp3`;
+                    }
+                 }
+
                 album = {
                     id: faceId,
                     name: 'Unnamed', // Default name for new faces
@@ -137,7 +149,7 @@ export async function createOrUpdateAlbums(
                     media: [],
                     mediaCount: 0,
                     voiceSampleAvailable: !!media.identifiedVoice, // Check if the *first* media has voice
-                    voiceSampleUrl: media.identifiedVoice ? (media.type === 'audio' ? media.url : (media.type === 'video' ? `${media.url.replace(/\.\w+$/, '')}_audio.mp3` : null)) : null, // Use first identified voice sample
+                    voiceSampleUrl: initialVoiceUrl, // Use first identified voice sample
                     summary: ''
                 };
                 albumsMap.set(faceId, album);
@@ -160,7 +172,12 @@ export async function createOrUpdateAlbums(
                  // Update voice sample if not set and current media has identified voice
                  if (!album.voiceSampleUrl && media.identifiedVoice) {
                     album.voiceSampleAvailable = true;
-                    album.voiceSampleUrl = media.type === 'audio' ? media.url : (media.type === 'video' ? `${media.url.replace(/\.\w+$/, '')}_audio.mp3` : null);
+                     if (media.type === 'audio') {
+                        album.voiceSampleUrl = media.url;
+                    } else if (media.type === 'video') {
+                        // Use the potentially extracted audio URL (simulated)
+                        album.voiceSampleUrl = `${media.url.replace(/\.\w+$/, '')}_audio.mp3`;
+                    }
                  }
             }
         });
@@ -208,15 +225,24 @@ export async function linkChatsToAlbums(
              const album = albumsMap.get(link.linkedAlbumId);
              if (album) {
                  // Construct a MediaItem for the chat
+                 // Find the corresponding chat MediaItem from the full upload list
+                 // This assumes chatLinks fileId matches the generated ID in upload page
+                 // A more robust approach might use the persistent URL or a DB lookup.
+                 // For simulation, we'll rely on the fileId matching.
+
+                 // TODO: Fetch actual chatData content from storage based on a persistent ID/URL
+                 // let chatContent = await fetchChatContent(link.persistentUrl); // Example
+                 const chatContent = `[Content for ${link.fileName} - load from storage]`;
+
                  const chatMediaItem: MediaItem = {
-                     id: link.fileId, // Use the chat file identifier
+                     id: link.fileId, // Use the chat file identifier from link
                      type: 'chat',
                      url: `chat_data_path/${link.fileId}`, // Placeholder URL/path to actual chat content
                      alt: `Chat: ${link.fileName}`,
                      source: link.source,
-                     // TODO: Fetch actual chatData content if needed immediately, or load lazily
-                     chatData: `[Content for ${link.fileName} - load from storage]`,
+                     chatData: chatContent,
                  };
+
 
                  // Avoid adding duplicate chat links
                  if (!album.media.some(m => m.id === chatMediaItem.id && m.type === 'chat')) {
@@ -241,11 +267,11 @@ export async function linkChatsToAlbums(
  * Orchestrates the process after uploads: processes media, creates/updates albums, and links chats.
  *
  * @param uploadedMediaFiles All uploaded files represented as MediaItems (including chats).
- * @param chatLinkingInfo Information about how chats should be linked.
+ * @param chatLinkingInfo Information about how chats should be linked. Defaults to empty array.
  */
 export async function handleNewUploads(
     uploadedMediaFiles: MediaItem[],
-    chatLinkingInfo: LinkedChat[]
+    chatLinkingInfo: LinkedChat[] = [] // Default to empty array if undefined
 ) {
     console.log("Processing new uploads:", uploadedMediaFiles.map(f => f.id));
     console.log("Chat linking info:", chatLinkingInfo);
@@ -265,9 +291,12 @@ export async function handleNewUploads(
         console.log("Album creation/update based on media complete.");
 
         // --- Step 4: Link Chats to the updated albums ---
-        if (chatLinkingInfo.length > 0) {
+        // Ensure chatLinkingInfo is an array before checking length
+        if (Array.isArray(chatLinkingInfo) && chatLinkingInfo.length > 0) {
             updatedAlbums = await linkChatsToAlbums(chatLinkingInfo, updatedAlbums);
             console.log("Chat linking complete.");
+        } else {
+             console.log("No chat linking information provided or chatLinkingInfo is empty.");
         }
 
         // --- Step 5: Persist all changes ---
@@ -287,9 +316,9 @@ export async function handleNewUploads(
 //     { id: 'vid1', url: 'persistent/path/to/video1.mp4', type: 'video', alt: 'Video 1' },
 //     { id: 'aud1', url: 'persistent/path/to/audio1.mp3', type: 'audio', alt: 'Audio 1' },
 //     { id: 'img1', url: 'persistent/path/to/image1.jpg', type: 'image', alt: 'Image 1' },
-//     { id: 'chat1_txt', url: 'persistent/path/to/whatsapp_chat.txt', type: 'chat', alt: 'whatsapp_chat.txt', source: 'whatsapp' },
+//     { id: 'chat1_txt_1678886400000', url: 'persistent/path/to/whatsapp_chat.txt', type: 'chat', alt: 'whatsapp_chat.txt', source: 'whatsapp' },
 // ];
 // const exampleLinks: LinkedChat[] = [
-//     { fileId: 'chat1_txt', fileName: 'whatsapp_chat.txt', source: 'whatsapp', linkedAlbumId: 'face_alex_j' }
+//     { fileId: 'chat1_txt_1678886400000', fileName: 'whatsapp_chat.txt', source: 'whatsapp', linkedAlbumId: 'face_alex_j' }
 // ];
 // handleNewUploads(exampleUploads, exampleLinks);
