@@ -1,328 +1,639 @@
 
-import type { DetectedFace } from '@/services/face-recognition';
+'use server'; // Potentially needed if functions are called from server components/actions
+
+import type { FaceBoundingBox } from '@/services/face-recognition'; // Keep BoundingBox if used internally
 import type { VoiceProfile } from '@/services/voice-recognition';
 import { detectFaces } from '@/services/face-recognition';
 import { identifySpeaker } from '@/services/voice-recognition';
 import { summarizeAlbumContent } from '@/ai/flows/summarize-album-content';
-import type { MediaItem, Album, LinkedChat } from '@/types'; // Import shared types
+import type {
+    MediaItem,
+    Album,
+    ChatFileLinkInfo,
+    AnalyzedFace,
+    AnalyzedVoice,
+    MediaAnalysisResult,
+    UploadAnalysisResults,
+    UserReviewDecisions
+} from '@/types'; // Import shared types
 
+// --- Mock Database/State ---
+// In a real app, this would interact with a database (e.g., Firestore, Prisma)
+let mockAlbumDatabase: Map<string, Album> = new Map([
+    // Add some initial mock albums if needed for testing
+    // { id: 'face_alex_j', name: 'Alex Johnson', mediaCount: 4, voiceSampleAvailable: true, coverImage: '...', media: [], voiceSampleUrl: '...' },
+]);
 
-interface ProcessedMedia extends MediaItem {
-    detectedFaces: DetectedFace[];
-    identifiedVoice: VoiceProfile | null;
+async function fetchAlbumsFromDatabase(): Promise<Album[]> {
+    console.log("Fetching albums from mock DB...");
+    // Simulate DB fetch delay
+    await new Promise(resolve => setTimeout(resolve, 50));
+    return Array.from(mockAlbumDatabase.values());
 }
+
+async function saveAlbumsToDatabase(albums: Album[]): Promise<void> {
+    console.log(`Saving ${albums.length} albums to mock DB...`);
+    // Simulate DB save delay
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // Update the mock database
+    const newDb = new Map<string, Album>();
+    albums.forEach(album => newDb.set(album.id, album));
+    mockAlbumDatabase = newDb;
+    console.log("Mock DB updated.");
+}
+
+async function fetchChatContent(file: File): Promise<string> {
+     console.log(`Simulating fetching content for chat file: ${file.name}`);
+     // Simulate reading file content
+     await new Promise(resolve => setTimeout(resolve, 50));
+     try {
+         return await file.text();
+     } catch (error) {
+         console.error(`Error reading chat file ${file.name}:`, error);
+         return `[Error reading content for ${file.name}]`;
+     }
+}
+// --- End Mock Database/State ---
 
 
 /**
  * Placeholder function to simulate extracting audio from video.
- * In a real app, this would use a library like ffmpeg.
- * @param videoUrl URL of the video file.
- * @returns Promise resolving to the URL of the extracted audio file.
+ * @param videoFile The video File object.
+ * @returns Promise resolving to a placeholder URL or identifier for the extracted audio.
  */
-async function extractAudio(videoUrl: string): Promise<string> {
-    console.log(`Simulating audio extraction from ${videoUrl}`);
-    // Simulate delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    // Return a placeholder audio URL
-    return `${videoUrl.replace(/\.\w+$/, '')}_audio.mp3`;
+async function extractAudio(videoFile: File): Promise<string> {
+    console.log(`Simulating audio extraction from ${videoFile.name}`);
+    await new Promise(resolve => setTimeout(resolve, 500)); // Simulate delay
+    // Return a placeholder representing the extracted audio data path
+    return `extracted_audio_path/${videoFile.name.replace(/\.[^/.]+$/, "")}.mp3`;
 }
 
-
 /**
- * Processes a batch of uploaded media files to detect faces and identify voices.
- * Filters out chat files as they don't undergo face/voice processing directly.
- * @param mediaFiles Array of media files to process.
- * @returns Promise resolving to an array of processed media objects (excluding chats).
+ * Placeholder function to simulate cropping a face from an image.
+ * @param mediaFile The image/video File object.
+ * @param boundingBox The bounding box of the face.
+ * @returns Promise resolving to a Data URL of the cropped face.
  */
-export async function processMediaFiles(mediaFiles: MediaItem[]): Promise<ProcessedMedia[]> {
-    const processableFiles = mediaFiles.filter(file => file.type !== 'chat');
+async function cropFace(mediaFile: File, boundingBox: FaceBoundingBox): Promise<string> {
+    console.log(`Simulating face crop from ${mediaFile.name}`);
+    await new Promise(resolve => setTimeout(resolve, 100)); // Simulate delay
 
-    const processedMediaPromises = processableFiles.map(async (file) => {
-        let audioUrl = file.url;
-        let voice: VoiceProfile | null = null;
-        let faces: DetectedFace[] = [];
-
+    // In a real app, use Canvas API or a server-side library
+    // Check if running in a browser environment before using Canvas
+    if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
         try {
-            // Extract audio only if it's a video or audio file
-            if (file.type === 'video') {
-                audioUrl = await extractAudio(file.url);
+            const canvas = document.createElement('canvas');
+            canvas.width = boundingBox.width || 50; // Add fallback size
+            canvas.height = boundingBox.height || 50; // Add fallback size
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                // If the file is an image, draw it and crop
+                if (mediaFile.type.startsWith('image/')) {
+                    const img = await createImageBitmap(mediaFile);
+                    // Calculate source rectangle (sx, sy, sWidth, sHeight) from boundingBox
+                    // Assuming boundingBox coordinates are relative to the image's original size
+                    const sx = boundingBox.x;
+                    const sy = boundingBox.y;
+                    const sWidth = boundingBox.width;
+                    const sHeight = boundingBox.height;
+                    // Draw the cropped portion onto the canvas
+                    ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, canvas.width, canvas.height);
+                    img.close(); // Release memory
+                } else {
+                     // Placeholder for non-image files (e.g., video frames - needs more complex handling)
+                    ctx.fillStyle = `hsl(${Math.random() * 360}, 70%, 80%)`; // Random color placeholder
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = 'black';
+                    ctx.font = '10px sans-serif';
+                    ctx.fillText('Face', 5, 15);
+                }
+                return canvas.toDataURL('image/png');
             }
-
-            // Run face and voice recognition concurrently only for relevant types
-            const promises = [];
-            if (file.type === 'video' || file.type === 'image') {
-                promises.push(
-                    detectFaces(file.url).catch(err => {
-                        console.error(`Face detection failed for ${file.url}:`, err);
-                        return []; // Return empty array on failure
-                    })
-                );
-            } else {
-                promises.push(Promise.resolve([])); // No faces for audio files
-            }
-
-            if (file.type === 'video' || file.type === 'audio') {
-                 // Use the potentially extracted audio URL
-                promises.push(
-                    identifySpeaker(audioUrl).catch(err => {
-                        console.error(`Voice identification failed for ${audioUrl} (from ${file.url}):`, err);
-                        return null; // Return null on failure
-                    })
-                );
-            } else {
-                 promises.push(Promise.resolve(null)); // No voice for image files
-            }
-
-            [faces, voice] = await Promise.all(promises);
-
         } catch (error) {
-             console.error(`Error processing file ${file.url}:`, error);
-             // Continue with empty results if processing fails mid-way
-             faces = [];
-             voice = null;
+            console.error("Error during face cropping with Canvas:", error);
+            // Fallback or re-throw error
+        }
+    }
+
+    // Fallback if not in browser or canvas failed
+    console.warn("Canvas API not available or failed, returning placeholder Data URL for face crop.");
+    return `data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTAiIGhlaWdodD0iNTAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjUwIiBoZWlnaHQ9IjUwIiBmaWxsPSJsaWdodGdyYXkiLz48dGV4dCB4PSI1IiB5PSIxNSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9ImJsYWNrIj5GYWNlPC90ZXh0Pjwvc3ZnPg==`; // Simple SVG placeholder
+}
+
+
+/**
+ * Processes a single uploaded media file (image, video, audio) for analysis.
+ * @param mediaItem The media item containing the File object.
+ * @returns Promise resolving to MediaAnalysisResult.
+ */
+async function analyzeSingleMediaFile(mediaItem: MediaItem): Promise<MediaAnalysisResult> {
+    if (!mediaItem.file) {
+        throw new Error(`MediaItem ${mediaItem.id} is missing the File object for analysis.`);
+    }
+
+    let audioPathForVoiceAnalysis: string | null = null; // Path/URL used for voice analysis
+    let analyzedFaces: AnalyzedFace[] = [];
+    let analyzedVoice: AnalyzedVoice | null = null;
+
+    try {
+        // --- Audio Extraction (for Videos) ---
+        if (mediaItem.type === 'video') {
+            audioPathForVoiceAnalysis = await extractAudio(mediaItem.file);
+        } else if (mediaItem.type === 'audio') {
+            audioPathForVoiceAnalysis = `audio_path/${mediaItem.file.name}`; // Use placeholder path for audio
         }
 
+        // --- Concurrent Face and Voice Analysis ---
+        const analysisPromises: [Promise<any>, Promise<any>] = [Promise.resolve([]), Promise.resolve(null)]; // Defaults
 
-        return {
-            ...file, // Spread original file info
-            detectedFaces: faces,
-            identifiedVoice: voice,
-        } as ProcessedMedia; // Cast to ProcessedMedia
-    });
+        if (mediaItem.type === 'video' || mediaItem.type === 'image') {
+            analysisPromises[0] = detectFaces(mediaItem.file) // Pass File object to mock service
+                .then(async (detectedFaces) => {
+                    // Assign temporary IDs and crop faces
+                    const facesWithTempIds = await Promise.all(
+                        detectedFaces.map(async (face, index) => ({
+                            ...face,
+                            tempId: `${mediaItem.id}_face_${index}`, // Unique temp ID per upload batch
+                            imageDataUrl: await cropFace(mediaItem.file!, face.boundingBox).catch(e => {
+                                console.error("Face cropping failed:", e); return undefined;
+                            }),
+                            selectedAlbumId: null, // Initialize selection
+                        }))
+                    );
+                    return facesWithTempIds;
+                })
+                .catch(err => {
+                    console.error(`Face detection failed for ${mediaItem.file?.name}:`, err);
+                    return []; // Return empty array on failure
+                });
+        }
 
-    return Promise.all(processedMediaPromises);
+        if (audioPathForVoiceAnalysis) {
+            analysisPromises[1] = identifySpeaker(audioPathForVoiceAnalysis) // Pass audio path/ID
+                 .then((voiceProfile) => {
+                     if (voiceProfile) {
+                         return {
+                             tempId: `${mediaItem.id}_voice_${voiceProfile.id}`, // Unique temp ID
+                             profileId: voiceProfile.id,
+                             name: voiceProfile.name,
+                             selectedAlbumId: null, // Initialize selection
+                         } as AnalyzedVoice;
+                     }
+                     return null;
+                 })
+                .catch(err => {
+                    console.error(`Voice identification failed for ${audioPathForVoiceAnalysis} (from ${mediaItem.file?.name}):`, err);
+                    return null; // Return null on failure
+                });
+        }
+
+        [analyzedFaces, analyzedVoice] = await Promise.all(analysisPromises);
+
+    } catch (error) {
+        console.error(`Error analyzing file ${mediaItem.file.name}:`, error);
+        // Reset results on error
+        analyzedFaces = [];
+        analyzedVoice = null;
+    }
+
+    // Clean up temporary Object URL if it was created and no longer needed
+     if (mediaItem.url.startsWith('blob:') && analyzedFaces.every(f => f.imageDataUrl)) {
+          console.log(`Revoking temporary URL for ${mediaItem.alt}: ${mediaItem.url}`);
+          URL.revokeObjectURL(mediaItem.url);
+     }
+
+    return {
+        originalMedia: {
+            ...mediaItem,
+            // Replace temporary URL with a placeholder persistent path BEFORE review
+            // In real app, this path comes from successful storage upload
+            url: `persistent/path/to/${mediaItem.file.name}`,
+            // Remove File object after analysis, unless needed downstream (unlikely)
+            file: undefined, // Remove file object to prevent serialization issues if passed around
+        },
+        analyzedFaces: analyzedFaces,
+        analyzedVoice: analyzedVoice,
+    };
 }
 
 /**
- * Clusters processed media into albums based on detected faces.
- * Creates "Unnamed" albums for new faces.
- * Allows linking chat files separately.
+ * Analyzes a batch of uploaded files (media and chats) to detect faces/voices
+ * and prepare data for the user review step.
  *
- * @param processedMedia Array of processed media objects (images, videos, audio).
- * @param existingAlbums Current list of albums (to avoid duplicates and find existing).
- * @returns Promise resolving to an updated array of Album objects.
+ * @param uploadedFiles Array of File objects from the input.
+ * @returns Promise resolving to UploadAnalysisResults containing data for the review modal.
  */
-export async function createOrUpdateAlbums(
-    processedMedia: ProcessedMedia[],
-    existingAlbums: Album[] = [] // Pass existing albums if available
-): Promise<Album[]> {
-    const albumsMap: Map<string, Album> = new Map(existingAlbums.map(a => [a.id, a]));
+export async function analyzeUploadedFiles(uploadedFiles: File[]): Promise<UploadAnalysisResults> {
+    console.log(`Starting analysis for ${uploadedFiles.length} files...`);
 
-    // --- 1. Group Media by Face ---
-    processedMedia.forEach(media => {
-        if (media.detectedFaces.length === 0 && media.identifiedVoice) {
-            // Handle voice-only media if needed (e.g., create voice-specific albums)
-             console.log(`Media ${media.id} has voice but no faces.`);
-            // Simplified: Add to a generic 'Voice Notes' album or handle differently
-             // const voiceAlbumId = `voice_${media.identifiedVoice.id}`;
-             // if (!albumsMap.has(voiceAlbumId)) { ... }
-             // albumsMap.get(voiceAlbumId)?.media.push(media);
+    const mediaItemsToAnalyze: MediaItem[] = [];
+    const chatFilesToLink: ChatFileLinkInfo[] = [];
+
+    // --- 1. Categorize files and create initial MediaItem/ChatFileLinkInfo objects ---
+    uploadedFiles.forEach((file, index) => {
+        const fileId = `${file.name}_${file.lastModified}`; // Simple unique ID for client-side tracking
+
+        let mediaType: MediaItem['type'] | null = null;
+        if (file.type.startsWith('image/')) mediaType = 'image';
+        else if (file.type.startsWith('video/')) mediaType = 'video';
+        else if (file.type.startsWith('audio/')) mediaType = 'audio';
+        else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) mediaType = 'chat';
+
+        if (mediaType && mediaType !== 'chat') {
+            let tempUrl = '';
+            try {
+                 // Create temporary URL only if needed (e.g., for potential cropping preview)
+                 // This might not be necessary if cropping happens server-side or isn't previewed
+                 tempUrl = URL.createObjectURL(file);
+                 console.log(`Created temporary URL for ${file.name}: ${tempUrl}`);
+             } catch (e) {
+                 console.error("Could not create Object URL (maybe not in browser context?):", e);
+             }
+            mediaItemsToAnalyze.push({
+                id: `upload_${Date.now()}_${index}`, // Temporary processing ID
+                type: mediaType,
+                url: tempUrl, // Store temporary URL
+                alt: file.name,
+                source: 'upload',
+                file: file, // Keep File object for analysis
+            });
+        } else if (mediaType === 'chat') {
+            // Determine source (basic example)
+            let source: ChatFileLinkInfo['source'] = 'upload';
+            if (file.name.toLowerCase().includes('whatsapp')) source = 'whatsapp';
+            else if (file.name.toLowerCase().includes('instagram')) source = 'instagram';
+            else if (file.name.toLowerCase().includes('facebook')) source = 'facebook';
+
+            chatFilesToLink.push({
+                fileId: fileId,
+                fileName: file.name,
+                file: file, // Keep file object for content reading later if needed
+                source: source,
+                selectedAlbumId: null, // Initialize selection
+            });
+        } else {
+            console.warn(`Skipping unsupported file type: ${file.name} (${file.type})`);
         }
+    });
 
-        media.detectedFaces.forEach(face => {
-            // Generate a unique ID for the face.
-            // In a real system, this would come from a face recognition service
-            // or be based on comparing face embeddings/vectors.
-            // Simple placeholder using bounding box for demo uniqueness:
-            const faceId = `face_${Math.round(face.boundingBox.x / 10)}_${Math.round(face.boundingBox.y / 10)}`;
+    // --- 2. Analyze Media Files Concurrently ---
+    console.log(`Analyzing ${mediaItemsToAnalyze.length} media files...`);
+    const analysisPromises = mediaItemsToAnalyze.map(analyzeSingleMediaFile);
+    const mediaResults = await Promise.all(analysisPromises);
+    console.log("Media analysis complete.");
 
-            let album = albumsMap.get(faceId);
+    // --- 3. Fetch Existing Albums for Linking ---
+    const existingAlbums = await fetchAlbumsFromDatabase();
 
-            if (!album) {
-                // --- Create New "Unnamed" Album ---
-                 console.log(`Creating new unnamed album for face ID: ${faceId}`);
-                 // Determine the audio URL for the first voice sample
-                 let initialVoiceUrl: string | null = null;
-                 if (media.identifiedVoice) {
-                    if (media.type === 'audio') {
-                        initialVoiceUrl = media.url;
-                    } else if (media.type === 'video') {
-                        // Use the potentially extracted audio URL (simulated)
-                        initialVoiceUrl = `${media.url.replace(/\.\w+$/, '')}_audio.mp3`;
-                    }
-                 }
+    console.log("Analysis phase complete. Returning results for review.");
+    return {
+        mediaResults,
+        chatFilesToLink,
+        existingAlbums,
+    };
+}
 
-                album = {
-                    id: faceId,
-                    name: 'Unnamed', // Default name for new faces
-                    coverImage: media.type === 'image' || media.type === 'video' ? media.url : 'https://picsum.photos/seed/placeholder/200/200', // Use media as initial cover, or placeholder
-                    media: [],
-                    mediaCount: 0,
-                    voiceSampleAvailable: !!media.identifiedVoice, // Check if the *first* media has voice
-                    voiceSampleUrl: initialVoiceUrl, // Use first identified voice sample
-                    summary: ''
-                };
-                albumsMap.set(faceId, album);
-            }
 
-            // --- Add Media to Album ---
-            // Avoid adding duplicates if processing is re-run
-            if (!album.media.some(m => m.id === media.id)) {
-                album.media.push(media);
-                album.mediaCount = album.media.length; // Update count
+/**
+ * Creates or updates albums based on user decisions from the review step.
+ *
+ * @param userDecisions The mappings decided by the user in the review modal.
+ * @param analysisResults The original analysis results containing media/face/voice details.
+ * @param existingAlbums Current list of albums from the database.
+ * @returns Promise resolving to the updated array of Album objects.
+ */
+async function createOrUpdateAlbumsFromReview(
+    userDecisions: UserReviewDecisions,
+    analysisResults: UploadAnalysisResults,
+    existingAlbums: Album[]
+): Promise<Album[]> {
+    console.log("Applying user review decisions to albums...");
+    const albumsMap: Map<string, Album> = new Map(existingAlbums.map(a => [a.id, { ...a, media: [...a.media] }])); // Deep copy media array
+    const newUnnamedAlbums: Map<string, Album> = new Map(); // Track newly created unnamed albums in this batch
+    const mediaAddedToAlbum: Map<string, Set<string | number>> = new Map(); // Track which media (by id) was added to which album (by id) in this run
 
-                 // Update cover image preference (image > video > audio)
-                if (media.type === 'image') {
-                     album.coverImage = media.url; // Prefer image covers
-                } else if (media.type === 'video' && !album.media.some(m => m.type === 'image')) {
-                     // Use video thumbnail URL (assuming generated elsewhere or use original URL)
-                     album.coverImage = media.url; // Or a specific thumbnail URL
-                }
-
-                 // Update voice sample if not set and current media has identified voice
-                 if (!album.voiceSampleUrl && media.identifiedVoice) {
-                    album.voiceSampleAvailable = true;
-                     if (media.type === 'audio') {
-                        album.voiceSampleUrl = media.url;
-                    } else if (media.type === 'video') {
-                        // Use the potentially extracted audio URL (simulated)
-                        album.voiceSampleUrl = `${media.url.replace(/\.\w+$/, '')}_audio.mp3`;
-                    }
-                 }
-            }
-        });
+    // Initialize tracking sets for existing albums
+    existingAlbums.forEach(album => {
+        mediaAddedToAlbum.set(album.id, new Set());
     });
 
 
-     // --- 2. Generate Summaries (Optional) ---
-     // Could be done here or lazily when an album is viewed
+    // --- 1. Process Face Mappings ---
+    for (const faceMap of userDecisions.faceMappings) {
+        if (faceMap.assignedAlbumId === null) continue; // User chose to ignore this face
+
+        // Find the original media item and face details
+        const resultContainingFace = analysisResults.mediaResults.find(res =>
+            res.analyzedFaces.some(f => f.tempId === faceMap.tempFaceId)
+        );
+        if (!resultContainingFace) {
+            console.warn(`Could not find original media for face ${faceMap.tempFaceId}`);
+            continue;
+        }
+        const analyzedFace = resultContainingFace.analyzedFaces.find(f => f.tempId === faceMap.tempFaceId)!;
+        const mediaItem = resultContainingFace.originalMedia; // Contains the persistent URL now
+
+        let targetAlbum: Album | undefined;
+        let isNewAlbum = false;
+
+        if (faceMap.assignedAlbumId === 'new_unnamed') {
+            // --- Create a new "Unnamed" album ---
+            const newAlbumId = `album_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
+            console.log(`Creating new unnamed album (ID: ${newAlbumId}) for face ${faceMap.tempFaceId}`);
+
+            // Find associated voice *from the same media item* if any was analyzed
+            const associatedVoice = resultContainingFace.analyzedVoice;
+            let voiceUrl: string | null = null;
+            if (associatedVoice && userDecisions.voiceMappings.some(vm => vm.tempVoiceId === associatedVoice.tempId && vm.assignedAlbumId === 'new_unnamed')) {
+                // If a voice from the *same media* is also being assigned to a *new* album
+                 if (mediaItem.type === 'audio') voiceUrl = mediaItem.url;
+                 else if (mediaItem.type === 'video') voiceUrl = `extracted_audio_path/${mediaItem.file?.name.replace(/\.[^/.]+$/, "")}.mp3`; // Use consistent placeholder path
+            }
+
+            targetAlbum = {
+                id: newAlbumId,
+                name: 'Unnamed',
+                coverImage: analyzedFace.imageDataUrl || // Use cropped face if available
+                              (mediaItem.type === 'image' || mediaItem.type === 'video'
+                                ? mediaItem.url // Fallback to media URL
+                                : 'https://picsum.photos/seed/placeholder/200/200'), // Placeholder if audio
+                media: [],
+                mediaCount: 0,
+                voiceSampleAvailable: !!voiceUrl,
+                voiceSampleUrl: voiceUrl,
+                summary: '' // Generate summary later
+            };
+            albumsMap.set(newAlbumId, targetAlbum);
+            newUnnamedAlbums.set(newAlbumId, targetAlbum); // Track it
+            mediaAddedToAlbum.set(newAlbumId, new Set()); // Initialize tracking for new album
+            isNewAlbum = true;
+
+        } else {
+            // --- Assign to Existing Album ---
+            targetAlbum = albumsMap.get(faceMap.assignedAlbumId);
+            if (!targetAlbum) {
+                console.warn(`Target album ${faceMap.assignedAlbumId} not found for face ${faceMap.tempFaceId}`);
+                continue;
+            }
+            console.log(`Assigning face ${faceMap.tempFaceId} (from ${mediaItem.alt}) to album ${targetAlbum.name} (${targetAlbum.id})`);
+        }
+
+        // --- Add Media to Target Album ---
+        // Check if this specific media item was *already* in the album *before* this run
+        const alreadyExisted = existingAlbums.find(a => a.id === targetAlbum!.id)?.media.some(m => m.id === mediaItem.id);
+        // Check if it was added *during* this run to this album
+        const addedThisRun = mediaAddedToAlbum.get(targetAlbum!.id)?.has(mediaItem.id);
+
+        if (!alreadyExisted && !addedThisRun) {
+            targetAlbum.media.push(mediaItem);
+            targetAlbum.mediaCount = targetAlbum.media.length;
+            mediaAddedToAlbum.get(targetAlbum!.id)?.add(mediaItem.id); // Mark as added this run
+
+            // --- Update Cover Image Logic (Prefer face crop, then image/video) ---
+             if (analyzedFace.imageDataUrl && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
+                 targetAlbum.coverImage = analyzedFace.imageDataUrl;
+             } else if ((mediaItem.type === 'image' || mediaItem.type === 'video') && (!targetAlbum.coverImage || targetAlbum.coverImage.includes('placeholder') || targetAlbum.coverImage.includes('picsum'))) {
+                 targetAlbum.coverImage = mediaItem.url; // Use the media URL as cover
+            }
+
+            // --- Update Voice Sample Logic (if applicable and not already set) ---
+            const associatedVoice = resultContainingFace.analyzedVoice;
+            const voiceMapping = userDecisions.voiceMappings.find(vm => vm.tempVoiceId === associatedVoice?.tempId);
+            if (!targetAlbum.voiceSampleUrl && associatedVoice && voiceMapping?.assignedAlbumId === targetAlbum.id) {
+                 if (mediaItem.type === 'audio') targetAlbum.voiceSampleUrl = mediaItem.url;
+                 else if (mediaItem.type === 'video') targetAlbum.voiceSampleUrl = `extracted_audio_path/${mediaItem.file?.name.replace(/\.[^/.]+$/, "")}.mp3`;
+                 targetAlbum.voiceSampleAvailable = true;
+                 console.log(`Set voice sample for album ${targetAlbum.id} from ${mediaItem.alt}`);
+            }
+        }
+    }
+
+    // --- 2. Process Direct Voice Mappings (if needed, e.g., voice-only media assigned) ---
+    for (const voiceMap of userDecisions.voiceMappings) {
+        if (voiceMap.assignedAlbumId === null) continue; // Ignored
+
+        const resultContainingVoice = analysisResults.mediaResults.find(res => res.analyzedVoice?.tempId === voiceMap.tempVoiceId);
+         if (!resultContainingVoice) continue;
+         const mediaItem = resultContainingVoice.originalMedia;
+
+         // Was a face from the *same* media item mapped?
+         const faceMapped = userDecisions.faceMappings.some(fm =>
+             resultContainingVoice.analyzedFaces.some(f => f.tempId === fm.tempFaceId) && fm.assignedAlbumId !== null
+         );
+
+        if (faceMapped) continue; // Handled by face mapping logic above
+
+         // Handle direct voice assignment (e.g., audio file, or video where face was ignored)
+         let targetAlbum: Album | undefined;
+         let isNewAlbum = false;
+
+         if (voiceMap.assignedAlbumId === 'new_unnamed') {
+             // Need to create a *new* unnamed album specifically for this voice
+             const newAlbumId = `album_${Date.now()}_${Math.random().toString(16).substring(2, 8)}`;
+             console.log(`Creating new unnamed album (ID: ${newAlbumId}) for voice ${voiceMap.tempVoiceId}`);
+
+             let voiceUrl : string | null = null;
+             if (mediaItem.type === 'audio') voiceUrl = mediaItem.url;
+             else if (mediaItem.type === 'video') voiceUrl = `extracted_audio_path/${mediaItem.file?.name.replace(/\.[^/.]+$/, "")}.mp3`;
+
+             targetAlbum = {
+                id: newAlbumId,
+                name: 'Unnamed (Voice)', // Indicate it might be voice-only initially
+                coverImage: 'https://picsum.photos/seed/voice_placeholder/200/200', // Placeholder cover
+                media: [],
+                mediaCount: 0,
+                voiceSampleAvailable: !!voiceUrl,
+                voiceSampleUrl: voiceUrl,
+                summary: ''
+             };
+             albumsMap.set(newAlbumId, targetAlbum);
+             newUnnamedAlbums.set(newAlbumId, targetAlbum);
+             mediaAddedToAlbum.set(newAlbumId, new Set()); // Initialize tracking
+             isNewAlbum = true;
+         } else {
+            targetAlbum = albumsMap.get(voiceMap.assignedAlbumId);
+             if (!targetAlbum) {
+                console.warn(`Target album ${voiceMap.assignedAlbumId} not found for voice ${voiceMap.tempVoiceId}`);
+                continue;
+            }
+             console.log(`Assigning voice ${voiceMap.tempVoiceId} (from ${mediaItem.alt}) directly to album ${targetAlbum.name} (${targetAlbum.id})`);
+         }
+
+         // Add media and potentially set voice sample if not already set
+        const alreadyExisted = existingAlbums.find(a => a.id === targetAlbum!.id)?.media.some(m => m.id === mediaItem.id);
+        const addedThisRun = mediaAddedToAlbum.get(targetAlbum!.id)?.has(mediaItem.id);
+
+        if (!alreadyExisted && !addedThisRun) {
+            targetAlbum.media.push(mediaItem);
+            targetAlbum.mediaCount = targetAlbum.media.length;
+            mediaAddedToAlbum.get(targetAlbum!.id)?.add(mediaItem.id); // Mark as added
+
+             if (!targetAlbum.voiceSampleUrl) {
+                 let voiceUrl : string | null = null;
+                 if (mediaItem.type === 'audio') voiceUrl = mediaItem.url;
+                 else if (mediaItem.type === 'video') voiceUrl = `extracted_audio_path/${mediaItem.file?.name.replace(/\.[^/.]+$/, "")}.mp3`;
+                 targetAlbum.voiceSampleUrl = voiceUrl;
+                 targetAlbum.voiceSampleAvailable = !!voiceUrl;
+             }
+        }
+    }
+
+
+     // --- 3. Generate Summaries for New/Updated Albums ---
      for (const album of albumsMap.values()) {
-         if (!album.summary && album.media.length > 0) { // Only generate if missing and has media
+         // Check if any media was added *this run* OR if it's a brand new album
+         const wasMediaAdded = mediaAddedToAlbum.get(album.id)?.size > 0;
+         const isNewOrUpdated = newUnnamedAlbums.has(album.id) || wasMediaAdded;
+
+         if (isNewOrUpdated && album.media.length > 0) { // Generate/Regenerate if new/updated & has media
+             console.log(`Attempting to generate summary for ${isNewOrUpdated ? 'new/updated' : ''} album ${album.id} (${album.name})`);
              try {
+                  // Simple description based on current state
                  const description = `Album for ${album.name === 'Unnamed' ? 'an unnamed person' : album.name}, containing ${album.mediaCount} items. Types include: ${[...new Set(album.media.map(m => m.type))].join(', ')}.`;
                  const summaryResult = await summarizeAlbumContent({ albumDescription: description });
                  album.summary = summaryResult.summary;
-                 console.log(`Generated summary for album ${album.id}`);
+                 console.log(`Generated summary for album ${album.id}: "${album.summary.substring(0,50)}..."`);
              } catch (error) {
                  console.error(`Failed to generate summary for album ${album.id}:`, error);
+                 album.summary = `[Summary generation failed: ${error instanceof Error ? error.message : 'Unknown error'}]`; // Add error placeholder
              }
          }
      }
 
 
     const finalAlbums = Array.from(albumsMap.values());
-    console.log("Updated Albums:", finalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount })));
-    // TODO: Persist finalAlbums to database
+    console.log("Albums after applying review:", finalAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount, summary: a.summary?.substring(0, 30) })));
     return finalAlbums;
 }
 
 /**
- * Links uploaded chat files to specified albums.
+ * Links chat files to albums based on user decisions from the review step.
+ * Assumes albums have potentially been created/updated in the previous step.
  *
- * @param chatLinks Information about which chat file to link to which album.
- * @param existingAlbums The current list of albums.
- * @returns The updated list of albums (potentially with chat media added).
+ * @param userDecisions User's choices from the review modal.
+ * @param analysisResults The original analysis results containing ChatFileLinkInfo.
+ * @param currentAlbums The state of albums *after* face/voice processing but *before* chat linking.
+ * @returns The updated list of albums with chats linked.
  */
-export async function linkChatsToAlbums(
-    chatLinks: LinkedChat[],
-    existingAlbums: Album[]
+export async function linkChatsToAlbumsFromReview(
+    userDecisions: UserReviewDecisions,
+    analysisResults: UploadAnalysisResults,
+    currentAlbums: Album[]
 ): Promise<Album[]> {
-     console.log("Linking chats:", chatLinks);
-     const albumsMap = new Map(existingAlbums.map(a => [a.id, a]));
+     console.log("Linking chats based on review decisions:", userDecisions.chatLinks);
+     const albumsMap = new Map(currentAlbums.map(a => [a.id, a])); // Use current state
 
-     for (const link of chatLinks) {
-         if (link.linkedAlbumId) {
-             const album = albumsMap.get(link.linkedAlbumId);
-             if (album) {
-                 // Construct a MediaItem for the chat
-                 // Find the corresponding chat MediaItem from the full upload list
-                 // This assumes chatLinks fileId matches the generated ID in upload page
-                 // A more robust approach might use the persistent URL or a DB lookup.
-                 // For simulation, we'll rely on the fileId matching.
+     for (const chatDecision of userDecisions.chatLinks) {
+         if (!chatDecision.linkedAlbumId) continue; // User chose "Don't Link"
 
-                 // TODO: Fetch actual chatData content from storage based on a persistent ID/URL
-                 // let chatContent = await fetchChatContent(link.persistentUrl); // Example
-                 const chatContent = `[Content for ${link.fileName} - load from storage]`;
+         const chatInfo = analysisResults.chatFilesToLink.find(cf => cf.fileId === chatDecision.fileId);
+         if (!chatInfo) {
+             console.warn(`Chat info not found for fileId ${chatDecision.fileId}`);
+             continue;
+         }
 
-                 const chatMediaItem: MediaItem = {
-                     id: link.fileId, // Use the chat file identifier from link
-                     type: 'chat',
-                     url: `chat_data_path/${link.fileId}`, // Placeholder URL/path to actual chat content
-                     alt: `Chat: ${link.fileName}`,
-                     source: link.source,
-                     chatData: chatContent,
-                 };
+         const targetAlbum = albumsMap.get(chatDecision.linkedAlbumId);
+         if (!targetAlbum) {
+             console.warn(`Target album ${chatDecision.linkedAlbumId} not found for chat ${chatInfo.fileName}`);
+             // This shouldn't happen if 'new_unnamed' albums were created correctly in the previous step
+             continue;
+         }
+
+         // --- Create MediaItem for the chat ---
+         // Fetch actual chat content asynchronously ONLY NOW when we know it's needed
+         const chatContent = await fetchChatContent(chatInfo.file);
+
+         const chatMediaItem: MediaItem = {
+             // Use a persistent ID scheme, maybe based on hash or DB id after upload
+             id: `chat_${chatInfo.fileId}_${Date.now()}`, // Example persistent ID
+             type: 'chat',
+             // In a real app, this URL points to the stored chat content in the backend/cloud
+             url: `persistent/chat_path/${chatInfo.fileId}.txt`, // Placeholder persistent path
+             alt: `Chat: ${chatInfo.fileName}`,
+             source: chatInfo.source,
+             chatData: chatContent, // Include the fetched content
+             file: undefined // Remove file object
+         };
 
 
-                 // Avoid adding duplicate chat links
-                 if (!album.media.some(m => m.id === chatMediaItem.id && m.type === 'chat')) {
-                    album.media.push(chatMediaItem);
-                    album.mediaCount = album.media.length;
-                    console.log(`Linked chat ${link.fileName} to album ${album.name}`);
-                 }
-             } else {
-                 console.warn(`Album ID ${link.linkedAlbumId} not found for chat ${link.fileName}`);
-             }
+         // --- Add Chat MediaItem to Album ---
+         if (!targetAlbum.media.some(m => m.type === 'chat' && m.url === chatMediaItem.url)) { // Prevent duplicate links
+            targetAlbum.media.push(chatMediaItem);
+            targetAlbum.mediaCount = targetAlbum.media.length;
+            console.log(`Linked chat ${chatInfo.fileName} to album ${targetAlbum.name}`);
          }
      }
 
      const updatedAlbums = Array.from(albumsMap.values());
-      // TODO: Persist updated album data (specifically the added chat MediaItems)
      console.log("Albums after linking chats:", updatedAlbums.map(a => ({ id: a.id, name: a.name, count: a.mediaCount })));
      return updatedAlbums;
 }
 
 
 /**
- * Orchestrates the process after uploads: processes media, creates/updates albums, and links chats.
+ * Orchestrates the final processing after user review:
+ * Updates/creates albums, links chats, and persists changes.
  *
- * @param uploadedMediaFiles All uploaded files represented as MediaItems (including chats).
- * @param chatLinkingInfo Information about how chats should be linked. Defaults to empty array.
+ * @param userDecisions The decisions made by the user in the review modal.
+ * @param analysisResults The results from the initial analysis phase.
  */
-export async function handleNewUploads(
-    uploadedMediaFiles: MediaItem[],
-    chatLinkingInfo: LinkedChat[] = [] // Default to empty array if undefined or null
+export async function finalizeUploadProcessing(
+    userDecisions: UserReviewDecisions,
+    analysisResults: UploadAnalysisResults,
 ) {
-    console.log("Processing new uploads:", uploadedMediaFiles.map(f => f.id));
-    console.log("Chat linking info:", chatLinkingInfo);
-
-    // Ensure chatLinkingInfo is always an array for safe access later
-    const safeChatLinkingInfo = Array.isArray(chatLinkingInfo) ? chatLinkingInfo : [];
-
+    console.log("Finalizing upload processing with user decisions...");
+    console.log("User Decisions:", userDecisions);
 
     try {
-        // --- Step 1: Process Media Files (Face/Voice Recognition) ---
-        // This filters out chats internally
-        const processedMedia = await processMediaFiles(uploadedMediaFiles);
-        console.log("Media processing complete:", processedMedia.length, "files processed.");
+        // --- Step 1: Fetch current state of albums ---
+        // Important to get the latest state before applying changes,
+        // especially if multiple uploads could happen concurrently.
+        const existingAlbums = await fetchAlbumsFromDatabase();
 
-        // --- Step 2: Fetch Existing Albums (from DB) ---
-        // const existingAlbums = await fetchAlbumsFromDatabase(); // Placeholder
-        const existingAlbums: Album[] = []; // Start with empty for this example
+        // --- Step 2: Create/Update Albums based on face/voice mappings ---
+        let updatedAlbums = await createOrUpdateAlbumsFromReview(
+            userDecisions,
+            analysisResults,
+            existingAlbums
+        );
+        console.log("Album creation/update based on review complete.");
 
-        // --- Step 3: Create or Update Albums based on processed media ---
-        let updatedAlbums = await createOrUpdateAlbums(processedMedia, existingAlbums);
-        console.log("Album creation/update based on media complete.");
+        // --- Step 3: Link Chats based on review decisions ---
+        // Pass the albums *after* potential new unnamed ones were created
+        updatedAlbums = await linkChatsToAlbumsFromReview(
+            userDecisions,
+            analysisResults,
+            updatedAlbums // Use the state after face/voice mapping
+        );
+        console.log("Chat linking complete.");
 
-        // --- Step 4: Link Chats to the updated albums ---
-        // Use the safe array now
-        if (safeChatLinkingInfo.length > 0) {
-            updatedAlbums = await linkChatsToAlbums(safeChatLinkingInfo, updatedAlbums);
-            console.log("Chat linking complete.");
-        } else {
-             console.log("No chat linking information provided or chatLinkingInfo is empty.");
-        }
+        // --- Step 4: Persist all changes to the database ---
+        await saveAlbumsToDatabase(updatedAlbums);
+        console.log("Final albums persisted.");
 
-        // --- Step 5: Persist all changes ---
-         // await saveAlbumsToDatabase(updatedAlbums); // Placeholder
-         console.log("Final albums ready for persistence:", updatedAlbums);
+        // --- Step 5: Update application state / Trigger UI refresh ---
+        // This might involve notifying the client, invalidating caches, etc.
+        // Example: using TanStack Query's queryClient.invalidateQueries(['albums'])
+        console.log("Processing finished. UI should refresh.");
 
-        // Here you might trigger UI updates or notifications
+        return { success: true, updatedAlbums }; // Indicate success
 
     } catch (error) {
-        console.error("Error during post-upload processing:", error);
-        // Handle error appropriately (e.g., notify user)
+        console.error("Error during final upload processing:", error);
+        // Handle error appropriately (e.g., notify user, potentially rollback?)
+        return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
     }
 }
 
-// Example Usage (conceptual - would be triggered by upload page completion)
-// const exampleUploads: MediaItem[] = [
-//     { id: 'vid1', url: 'persistent/path/to/video1.mp4', type: 'video', alt: 'Video 1' },
-//     { id: 'aud1', url: 'persistent/path/to/audio1.mp3', type: 'audio', alt: 'Audio 1' },
-//     { id: 'img1', url: 'persistent/path/to/image1.jpg', type: 'image', alt: 'Image 1' },
-//     { id: 'chat1_txt_1678886400000', url: 'persistent/path/to/whatsapp_chat.txt', type: 'chat', alt: 'whatsapp_chat.txt', source: 'whatsapp' },
-// ];
-// const exampleLinks: LinkedChat[] = [
-//     { fileId: 'chat1_txt_1678886400000', fileName: 'whatsapp_chat.txt', source: 'whatsapp', linkedAlbumId: 'face_alex_j' }
-// ];
-// handleNewUploads(exampleUploads, exampleLinks);
+// Example Usage Flow (conceptual):
+// 1. User uploads files -> `handleFileChange` on upload page.
+// 2. User clicks "Upload" -> `handleUpload` on upload page calls `analyzeUploadedFiles`.
+// 3. `analyzeUploadedFiles` returns `analysisResults`.
+// 4. `analysisResults` are passed to the `UploadReviewModal`.
+// 5. User makes selections in the modal -> `handleConfirmReview` (in modal) gathers `userDecisions`.
+// 6. `handleConfirmReview` calls `finalizeUploadProcessing(userDecisions, analysisResults)`.
+// 7. `finalizeUploadProcessing` updates the database and returns success/failure.
+// 8. UI updates based on the result (e.g., shows success toast, navigates to albums page).
+
+
+    

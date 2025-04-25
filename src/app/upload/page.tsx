@@ -1,81 +1,40 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Header } from '@/components/header';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { Upload, Link2, FileText, MessageSquare, Music, Video } from 'lucide-react';
-import { handleNewUploads } from '@/lib/face-voice-processing'; // Assuming this handles post-upload logic
-import type { Album, MediaItem, LinkedChat } from '@/types'; // Import types
+import { Upload, FileText, MessageSquare, Music, Video, Loader2 } from 'lucide-react';
+import { analyzeUploadedFiles, finalizeUploadProcessing } from '@/lib/face-voice-processing';
+import type { Album, MediaItem, UploadAnalysisResults, UserReviewDecisions } from '@/types';
+import { UploadReviewModal } from '@/components/upload-review-modal'; // Import the new modal
 
-// Mock function to get available albums (replace with actual API call)
-async function getAvailableAlbums(): Promise<Album[]> {
-  // Simulate API call delay
-  await new Promise(resolve => setTimeout(resolve, 300));
-  // Return mock album names/IDs for linking
-   const mockAlbumDatabase: Record<string, Album> = {
-    'face_alex_j': { id: 'face_alex_j', name: 'Alex Johnson', mediaCount: 4, voiceSampleAvailable: true, coverImage: '', media: [], voiceSampleUrl: '' },
-    'face_maria_g': { id: 'face_maria_g', name: 'Maria Garcia', mediaCount: 2, voiceSampleAvailable: false, coverImage: '', media: [], voiceSampleUrl: '' },
-    'face_chen_w': { id: 'face_chen_w', name: 'Chen Wei', mediaCount: 3, voiceSampleAvailable: true, coverImage: '', media: [], voiceSampleUrl: '' },
-    'face_samira_k': { id: 'face_samira_k', name: 'Samira Khan', mediaCount: 4, voiceSampleAvailable: true, coverImage: '', media: [], voiceSampleUrl: '' },
-    'face_unnamed_1': { id: 'face_unnamed_1', name: 'Unnamed', mediaCount: 1, voiceSampleAvailable: false, coverImage: '', media: [], voiceSampleUrl: '' },
-    'face_unnamed_2': { id: 'face_unnamed_2', name: 'Unnamed', mediaCount: 3, voiceSampleAvailable: false, coverImage: '', media: [], voiceSampleUrl: '' },
-  };
-  return Object.values(mockAlbumDatabase);
-}
 
 export default function UploadPage() {
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [albums, setAlbums] = useState<Album[]>([]);
-  const [linkedChats, setLinkedChats] = useState<LinkedChat[]>([]); // State to track linked chats
+  const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0); // Optional: for finer progress
+  const [analysisResults, setAnalysisResults] = useState<UploadAnalysisResults | null>(null);
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+
   const { toast } = useToast();
 
-   // Fetch available albums on component mount
-  useEffect(() => {
-    getAvailableAlbums().then(setAlbums);
-  }, []);
-
-
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = event.target.files;
-    setFiles(selectedFiles);
-    setUploadProgress(0);
-
-    // Prepare initial linking state for chat files
-    if (selectedFiles) {
-        const initialLinks: LinkedChat[] = Array.from(selectedFiles)
-            .filter(file => file.type.startsWith('text/') || file.name.endsWith('.txt')) // Basic chat file detection
-            .map(file => ({
-                fileId: file.name + file.lastModified, // Simple unique ID for demo
-                fileName: file.name,
-                // Determine source based on filename (basic example)
-                source: file.name.toLowerCase().includes('whatsapp') ? 'whatsapp' :
-                        file.name.toLowerCase().includes('instagram') ? 'instagram' :
-                        file.name.toLowerCase().includes('facebook') ? 'facebook' : 'whatsapp', // default
-                linkedAlbumId: null,
-            }));
-        setLinkedChats(initialLinks);
-    } else {
-        setLinkedChats([]);
-    }
+    const files = event.target.files;
+    setSelectedFiles(files);
+    setAnalysisResults(null); // Reset previous results
+    setAnalysisProgress(0);
+    setIsReviewModalOpen(false); // Close modal if it was open
   };
 
-   const handleAlbumLinkChange = (fileId: string, albumId: string | null) => {
-        setLinkedChats(prevLinks => prevLinks.map(link =>
-            link.fileId === fileId ? { ...link, linkedAlbumId: albumId === 'none' ? null : albumId } : link
-        ));
-    };
-
-  const handleUpload = async () => {
-    if (!files || files.length === 0) {
+  const handleAnalyzeUploads = async () => {
+    if (!selectedFiles || selectedFiles.length === 0) {
       toast({
         title: 'No files selected',
         description: 'Please select files to upload.',
@@ -84,100 +43,91 @@ export default function UploadPage() {
       return;
     }
 
-    setIsUploading(true);
-    setUploadProgress(0);
+    setIsAnalyzing(true);
+    setAnalysisProgress(0); // Reset progress
+    setAnalysisResults(null);
 
-    const mediaFilesToProcess: MediaItem[] = [];
-    const chatFilesToLink: LinkedChat[] = [...linkedChats]; // Use the state from linkedChats
-
-    const totalFiles = files.length;
-    let uploadedCount = 0;
-    const allUploadedFiles: MediaItem[] = []; // Store all files as MediaItems for handleNewUploads
-
-    for (let i = 0; i < totalFiles; i++) {
-      const file = files[i];
-      // Simulate network delay for each file
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Determine file type for processing
-      let fileType: MediaItem['type'] = 'image'; // Default guess
-      let source: MediaItem['source'] = 'upload'; // Default source
-
-      if (file.type.startsWith('video/')) {
-          fileType = 'video';
-      } else if (file.type.startsWith('audio/')) {
-          fileType = 'audio';
-      } else if (file.type.startsWith('text/') || file.name.endsWith('.txt')) { // Basic chat detection
-          fileType = 'chat';
-          // Assign source from linkedChats if found
-          const chatLink = chatFilesToLink.find(link => link.fileId === file.name + file.lastModified);
-          if (chatLink) {
-            source = chatLink.source;
-          }
-      }
-
-      // Create MediaItem for every file
-      const mediaItem: MediaItem = {
-          id: `upload_${Date.now()}_${i}`, // Temporary ID for processing
-          url: URL.createObjectURL(file), // Use object URL for local preview/processing simulation
-          type: fileType,
-          alt: file.name,
-          source: source
-      };
-
-      // TODO: Implement actual file upload logic here
-      // 1. Upload the file `file` to storage (e.g., Firebase Storage)
-      // 2. Get a persistent URL/identifier for the uploaded file.
-      // 3. Replace mediaItem.url with the persistent URL.
-      // Example: mediaItem.url = await uploadFileAndGetURL(file);
-
-       // For simulation, use placeholder persistent paths
-       mediaItem.url = `persistent/path/to/${file.name}`;
-       if(fileType === 'chat') {
-            mediaItem.url = `chat_data_path/${file.name + file.lastModified}` // Match linkChatsToAlbums placeholder
-       }
-
-      allUploadedFiles.push(mediaItem);
-
-      uploadedCount++;
-      const progress = (uploadedCount / totalFiles) * 100;
-      setUploadProgress(progress);
-      console.log(`Simulating upload of ${file.name}...`);
-    }
-
-    console.log('All uploaded files (as MediaItems):', allUploadedFiles);
-    console.log('Chat files ready for linking:', chatFilesToLink);
-
-
-    // Simulate processing and linking after successful upload simulation
     try {
-      // Trigger background processing and linking
-      // Pass ALL uploaded files and the linking info
-      await handleNewUploads(allUploadedFiles, chatFilesToLink); // Pass chatFilesToLink here
+      // Simulate progress (optional) - In real app, backend might provide progress updates
+      const progressInterval = setInterval(() => {
+          setAnalysisProgress(prev => Math.min(prev + 10, 90)); // Simulate progress up to 90%
+      }, 300);
 
+      const results = await analyzeUploadedFiles(Array.from(selectedFiles));
+      clearInterval(progressInterval); // Stop simulation
+      setAnalysisProgress(100); // Mark as complete
+
+      setAnalysisResults(results);
+      setIsReviewModalOpen(true); // Open the review modal with the results
       toast({
-        title: 'Upload Complete',
-        description: `${totalFiles} file(s) processed. Media analysis initiated, chats linked.`,
+        title: 'Analysis Complete',
+        description: 'Review the findings and confirm associations.',
       });
-      setUploadProgress(100); // Ensure progress bar shows 100%
+
     } catch (error) {
-       console.error("Error during post-upload handling:", error);
-       toast({
-        title: 'Processing Error',
-        description: 'Could not start media analysis or link chats.',
+      console.error("Error during file analysis:", error);
+      toast({
+        title: 'Analysis Error',
+        description: `Failed to analyze files. ${error instanceof Error ? error.message : ''}`,
         variant: 'destructive',
       });
+       setAnalysisProgress(0); // Reset progress on error
     } finally {
-       setIsUploading(false);
-       setFiles(null);
-       setLinkedChats([]); // Clear linking state
-       // Reset input field visually
-       const fileInput = document.getElementById('file-upload') as HTMLInputElement;
-       if (fileInput) fileInput.value = '';
-       // Optionally reset progress bar after a short delay
-       setTimeout(() => setUploadProgress(0), 2000);
+      setIsAnalyzing(false);
+       // Keep files selected in case user wants to retry analysis without re-selecting
     }
   };
+
+   // Callback function when the user confirms the review in the modal
+   const handleConfirmReview = async (userDecisions: UserReviewDecisions) => {
+     setIsReviewModalOpen(false); // Close the modal first
+     if (!analysisResults) {
+         console.error("Cannot finalize, analysis results are missing.");
+         toast({ title: 'Error', description: 'Analysis results missing.', variant: 'destructive' });
+         return;
+     }
+
+     setIsFinalizing(true);
+     console.log("Finalizing with decisions:", userDecisions);
+
+     try {
+         const result = await finalizeUploadProcessing(userDecisions, analysisResults);
+
+         if (result.success) {
+             toast({
+                 title: 'Upload Successful',
+                 description: 'Files processed and added to albums.',
+             });
+             // Reset state after successful finalization
+             setSelectedFiles(null);
+             setAnalysisResults(null);
+             setAnalysisProgress(0);
+             // Clear the file input visually
+             const fileInput = document.getElementById('file-upload') as HTMLInputElement;
+             if (fileInput) fileInput.value = '';
+         } else {
+             throw new Error(result.error || "Finalization failed.");
+         }
+
+     } catch (error) {
+         console.error("Error during finalization:", error);
+         toast({
+             title: 'Processing Error',
+             description: `Could not save changes. ${error instanceof Error ? error.message : ''}`,
+             variant: 'destructive',
+         });
+         // Keep state as is, user might want to retry confirming
+     } finally {
+         setIsFinalizing(false);
+     }
+   };
+
+  const handleCancelReview = () => {
+    setIsReviewModalOpen(false);
+    // Keep analysis results, user might want to re-open review
+    toast({ title: 'Review Cancelled', description: 'You can analyze again or modify selections.' });
+  };
+
 
    const getFileIcon = (file: File) => {
      if (file.type.startsWith('video/')) return <Video className="h-5 w-5 text-muted-foreground" />;
@@ -194,9 +144,9 @@ export default function UploadPage() {
         {/* Upload Card */}
         <Card className="w-full max-w-lg shadow-lg">
           <CardHeader>
-            <CardTitle className="text-2xl font-semibold text-center">Upload Media & Chats</CardTitle>
+            <CardTitle className="text-2xl font-semibold text-center">Upload & Analyze</CardTitle>
             <CardDescription className="text-center text-muted-foreground">
-              Upload videos, audio, images, or chat history files (.txt).
+              Select files to upload and analyze for faces and voices.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -206,26 +156,29 @@ export default function UploadPage() {
                 id="file-upload"
                 type="file"
                 multiple
-                accept="video/*,audio/*,image/*,text/plain,.txt" // Accept various types
+                accept="video/*,audio/*,image/*,text/plain,.txt"
                 onChange={handleFileChange}
-                disabled={isUploading}
+                disabled={isAnalyzing || isFinalizing} // Disable while processing
                 className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90 cursor-pointer"
               />
             </div>
 
-            {isUploading && (
+            {(isAnalyzing || isFinalizing) && (
               <div className="space-y-2">
-                <Progress value={uploadProgress} className="w-full" />
-                <p className="text-sm text-center text-muted-foreground">Uploading... {Math.round(uploadProgress)}%</p>
+                <Progress value={isAnalyzing ? analysisProgress : (isFinalizing ? undefined : 0)} className="w-full [&>div]:bg-primary" />
+                <p className="text-sm text-center text-muted-foreground">
+                  {isAnalyzing && `Analyzing... ${Math.round(analysisProgress)}%`}
+                  {isFinalizing && 'Finalizing upload...'}
+                </p>
               </div>
             )}
 
              {/* Display Selected Files */}
-             {files && files.length > 0 && !isUploading && (
+             {selectedFiles && selectedFiles.length > 0 && !isAnalyzing && !isFinalizing && (
                 <div className="space-y-2 max-h-32 overflow-y-auto pr-2">
-                    <p className="text-sm font-medium">{files.length} file(s) selected:</p>
+                    <p className="text-sm font-medium">{selectedFiles.length} file(s) selected:</p>
                     <ul className="list-none space-y-1">
-                        {Array.from(files).map((file, index) => (
+                        {Array.from(selectedFiles).map((file, index) => (
                             <li key={index} className="text-xs text-muted-foreground flex items-center space-x-2">
                                 {getFileIcon(file)}
                                 <span>{file.name}</span>
@@ -237,55 +190,37 @@ export default function UploadPage() {
 
 
             <Button
-              onClick={handleUpload}
-              disabled={isUploading || !files || files.length === 0}
-              className="w-full" // Use theme color
+              onClick={handleAnalyzeUploads}
+              disabled={isAnalyzing || isFinalizing || !selectedFiles || selectedFiles.length === 0 || !!analysisResults} // Disable if already analyzed or processing
+              className="w-full"
             >
-              <Upload className="mr-2 h-4 w-4" />
-              {isUploading ? 'Uploading...' : `Upload ${files?.length ?? 0} File(s)`}
+              {isAnalyzing ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="mr-2 h-4 w-4" />
+              )}
+              {isAnalyzing
+                ? 'Analyzing...'
+                : analysisResults
+                ? 'Analyzed - Review Pending'
+                : `Analyze ${selectedFiles?.length ?? 0} File(s)`}
             </Button>
           </CardContent>
         </Card>
 
-        {/* Chat Linking Card - Show only if chat files are selected */}
-        {linkedChats.length > 0 && !isUploading && (
-          <Card className="w-full max-w-lg shadow-lg">
-             <CardHeader>
-                 <CardTitle className="text-xl font-semibold text-center">Link Chats to Albums</CardTitle>
-                 <CardDescription className="text-center text-muted-foreground">
-                     Optionally link uploaded chat files to existing face/voice albums.
-                 </CardDescription>
-             </CardHeader>
-             <CardContent className="space-y-4">
-                {linkedChats.map(chatLink => (
-                    <div key={chatLink.fileId} className="flex flex-col sm:flex-row items-center justify-between gap-2 p-3 border rounded-md">
-                         <div className="flex items-center gap-2 flex-grow">
-                            <MessageSquare className="h-5 w-5 text-primary flex-shrink-0" />
-                            <span className="text-sm font-medium truncate" title={chatLink.fileName}>{chatLink.fileName}</span>
-                         </div>
-                         <Select
-                            value={chatLink.linkedAlbumId ?? 'none'}
-                            onValueChange={(value) => handleAlbumLinkChange(chatLink.fileId, value)}
-                         >
-                           <SelectTrigger className="w-full sm:w-[200px]">
-                             <SelectValue placeholder="Link to album..." />
-                           </SelectTrigger>
-                           <SelectContent>
-                             <SelectItem value="none">Don't Link</SelectItem>
-                             {albums.map(album => (
-                               <SelectItem key={album.id} value={album.id}>{album.name}</SelectItem>
-                             ))}
-                           </SelectContent>
-                         </Select>
-                    </div>
-                ))}
-             </CardContent>
-              <CardFooter className="text-xs text-muted-foreground text-center justify-center">
-                 <Link2 className="h-3 w-3 mr-1" /> Linking helps associate conversations with the people involved.
-             </CardFooter>
-          </Card>
-        )}
+       {/* Removed Chat Linking Card - Now part of the Review Modal */}
       </div>
+
+        {/* Review Modal */}
+        {analysisResults && (
+             <UploadReviewModal
+                isOpen={isReviewModalOpen}
+                onClose={handleCancelReview} // Use cancel handler for closing via 'X' or overlay click
+                onConfirm={handleConfirmReview}
+                analysisResults={analysisResults}
+                isProcessing={isFinalizing} // Pass finalizing state to disable confirm button
+            />
+         )}
     </>
   );
 }
